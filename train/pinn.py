@@ -210,9 +210,16 @@ def predict(net, xy):
     return o * np.array([U0, U0, P0])
 
 
-def metrics(pu, pv, pp):
-    """Errors on every fluid cell of the simulation."""
-    su, sv, sp = U[FLUID], V[FLUID], P[FLUID]
+# Cuales de las celdas fluidas son sensores. Hace falta para poder excluirlas
+# de la evaluacion: los 250 sensores SI se usaron para entrenar, asi que medir
+# sobre ellos no es medir sobre datos no vistos.
+SENSOR_EN_FLUIDO = np.isin(fid, sid)
+NO_VISTO = ~SENSOR_EN_FLUIDO
+
+
+def _errores(pu, pv, pp, sel):
+    su, sv, sp = U[FLUID][sel], V[FLUID][sel], P[FLUID][sel]
+    pu, pv, pp = pu[sel], pv[sel], pp[sel]
     spd_t, spd_p = np.hypot(su, sv), np.hypot(pu, pv)
     return {
         "rel_l2_speed": float(np.linalg.norm(spd_p - spd_t) / np.linalg.norm(spd_t)),
@@ -221,6 +228,24 @@ def metrics(pu, pv, pp):
         "mae_velocity_vec_ms": float(np.hypot(pu - su, pv - sv).mean()),
         "mae_pressure_pa": float(np.abs(pp - sp).mean()),
     }
+
+
+def metrics(pu, pv, pp):
+    """Errores sobre las celdas fluidas.
+
+    Se reportan DOS conjuntos y la cifra principal es la de datos no vistos.
+
+    Antes se medía sobre todas las celdas, incluidas las 250 de los sensores,
+    que el modelo ya había visto. Son el 1% del total, así que los números
+    apenas cambian, pero la frase "validado con datos no vistos" solo es
+    cierta excluyéndolas, y esa frase es justo la que hace defendible la demo.
+
+    Los baselines se miden igual, así que la comparación sigue siendo justa.
+    """
+    m = _errores(pu, pv, pp, NO_VISTO)
+    m["n_eval_cells"] = int(NO_VISTO.sum())
+    m["incluyendo_sensores"] = _errores(pu, pv, pp, np.ones_like(NO_VISTO))
+    return m
 
 
 GRID = np.stack([GX[FLUID], GY[FLUID]], 1)

@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Viento urbano PINN</title>
+  <meta name="description" content="Una red neuronal informada por la física (PINN) predice el viento en cualquier punto de una ciudad sintética a partir de unos pocos sensores.">
+  <meta name="theme-color" content="#0b0f14">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230b0f14'/><path d='M5 11h15a4 4 0 1 0-4-4M5 17h20a4 4 0 1 1-4 4M5 23h9' stroke='%2359d8ff' stroke-width='2.6' fill='none' stroke-linecap='round'/></svg>">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>Viento urbano <span class="accent">PINN</span></h1>
+      <p class="sub">Red neuronal informada por la física que predice el viento en cualquier punto de una ciudad a partir de <b id="nSensors">…</b> sensores.</p>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="mapcard">
+      <div class="toolbar">
+        <div class="seg" role="tablist" aria-label="Vista">
+          <button class="on" data-view="pinn" role="tab">PINN</button>
+          <button data-view="sim" role="tab">Simulación</button>
+          <button data-view="error" role="tab">Error |PINN−sim|</button>
+          <button data-view="base" role="tab">Solo sensores</button>
+        </div>
+        <div class="toggles">
+          <label><input type="checkbox" id="tParticles" checked> Partículas</label>
+          <label><input type="checkbox" id="tSensors"> Sensores</label>
+        </div>
+      </div>
+      <div class="mapwrap" id="mapwrap">
+        <canvas id="heat"></canvas>
+        <canvas id="flow"></canvas>
+        <canvas id="over"></canvas>
+        <div class="loading" id="loading">Cargando red neuronal…</div>
+        <div class="windtag">viento 5 m/s desde el oeste →</div>
+      </div>
+      <div class="legend">
+        <span id="legLabel">Velocidad del viento</span>
+        <canvas id="legbar" width="256" height="10"></canvas>
+        <div class="ticks" id="legTicks"></div>
+      </div>
+      <p class="viewnote" id="viewNote"></p>
+    </section>
+
+    <aside class="side">
+      <section class="card" id="probe">
+        <h2>Toca el mapa</h2>
+        <p class="muted">Toca o haz clic en cualquier punto de la ciudad para ver lo que predice la red en esa coordenada.</p>
+      </section>
+
+      <section class="card">
+        <h2>¿Qué tan bien funciona?</h2>
+        <p class="muted small">Error medido en <b id="nCells">…</b> celdas de aire de la simulación. La red solo vio los sensores.</p>
+        <table class="metrics" id="metrics"></table>
+        <p class="small" id="verdict"></p>
+      </section>
+    </aside>
+
+    <section class="card explain">
+      <h2>¿Qué es esto?</h2>
+      <div class="cols">
+        <div>
+          <h3>La idea</h3>
+          <p>Una <b>PINN</b> (<i>Physics-Informed Neural Network</i>) es una red neuronal que recibe una coordenada <code>(x, y)</code> y devuelve el viento ahí: velocidad <code>u</code>, <code>v</code> y presión <code>p</code>. A diferencia de una red normal, no solo aprende de los datos: durante el entrenamiento se le castiga cuando su respuesta viola las <b>ecuaciones de Navier–Stokes</b> (conservación de masa y de momento del aire).</p>
+        </div>
+        <div>
+          <h3>Por qué la física ayuda</h3>
+          <p>Con pocos sensores, interpolar entre ellos no sabe que hay edificios: “atraviesa” paredes y no ve las calles donde el viento se acelera. La PINN sí sabe que el aire no puede entrar a un edificio (velocidad cero en las paredes), que la masa se conserva y cómo se transmite la presión, así que <b>rellena los huecos entre sensores</b> con algo físicamente coherente.</p>
+        </div>
+        <div>
+          <h3>Qué es real y qué no</h3>
+          <p>Los “datos” vienen de una simulación 2D (método de Lattice Boltzmann) de viento a 5 m/s sobre una ciudad inventada de 480 × 240 m, promediada en el tiempo y con flujo casi laminar. No es meteorología real: un proyecto serio usaría simulaciones 3D (RANS/LES) o mediciones. La comparación sí es honesta: todos los errores se miden contra la simulación completa.</p>
+        </div>
+      </div>
+      <details>
+        <summary>Detalles técnicos</summary>
+        <div id="tech" class="small"></div>
+      </details>
+    </section>
+  </main>
+
+  <footer class="foot small muted">Inferencia de la red 100 % en tu navegador (JavaScript puro, sin servidor).</footer>
+  <script src="app.js"></script>
+</body>
+</html>

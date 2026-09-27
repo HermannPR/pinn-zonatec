@@ -1,0 +1,45 @@
+{
+ "n_sensors": 250,
+ "n_fluid_cells": 23809,
+ "config": {
+  "sensors": 250,
+  "iters": 8000,
+  "lbfgs": 0,
+  "ncol": 3000,
+  "width": 64,
+  "depth": 6,
+  "ff": 48,
+  "ff_sigma": 3.0,
+  "w_data": 10.0,
+  "w_pde": 1.0,
+  "w_bc": 5.0,
+  "lr": 0.002,
+  "no_baseline_mlp": false,
+  "no_export": false,
+  "seed": 0,
+  "threads": 7
+ },
+ "pinn": {
+  "rel_l2_speed": 0.31692888718513323,
+  "rel_l2_velocity": 0.4111427450815354,
+  "mae_speed_ms": 0.8919032952632683,
+  "mae_velocity_vec_ms": 1.1580106502158225,
+  "mae_pressure_pa": 10.698545790160443,
+  "train_seconds": 1107.1
+ },
+ "baseline_griddata": {
+  "rel_l2_speed": 0.39557868684210235,
+  "rel_l2_velocity": 0.4499480490378034,
+  "mae_speed_ms": 1.1537028409226564,
+  "mae_velocity_vec_ms": 1.4008437207785986,
+  "mae_pressure_pa": 5.677090577231567
+ },
+ "baseline_mlp_data_only": {
+  "rel_l2_speed": 0.37544760361772295,
+  "rel_l2_velocity": 0.4609317535492597,
+  "mae_speed_ms": 1.245653450412858,
+  "mae_velocity_vec_ms": 1.6711371290175554,
+  "mae_pressure_pa": 12.958769091945344,
+  "train_seconds": 13.2
+ }
+}

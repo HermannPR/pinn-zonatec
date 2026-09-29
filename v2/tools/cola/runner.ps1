@@ -1,6 +1,4 @@
-# Canal: servidor y topic vienen de variables de entorno o de un archivo local fuera del repo (nunca en git).
-if (-not $env:HIVEMIND_TOPIC -and (Test-Path 'C:\hivemind\canal.local.json')) { $cfg = Get-Content 'C:\hivemind\canal.local.json' -Raw | ConvertFrom-Json; $env:HIVEMIND_SERVER = $cfg.server; $env:HIVEMIND_TOPIC = $cfg.topic }
-# runner.ps1 - fail-safe sequential job queue for PINN Zona Tec (CFD + ML).
+﻿# runner.ps1 - fail-safe sequential job queue for PINN Zona Tec (CFD + ML).
 # Started (detached) by watchdog.ps1; safe to start by hand too. Only one instance runs (lock + PID check).
 # Job specs: E:\PINN\cola\jobs\*.json, processed in file-name order. Contract: E:\PINN\cola\README.md
 # State markers: E:\PINN\cola\state\<id>.DONE | .FAILED | .attempts | .verify.log ; logs: E:\PINN\logs\jobs\<id>.log
@@ -19,8 +17,18 @@ $env:TMP = 'E:\tmp'; $env:TEMP = 'E:\tmp'
 . E:\PINN\tools\of_env.ps1
 
 function Log($m) { $l = "$(Get-Date -Format s) [runner $PID] $m"; Add-Content -Path $RLOG -Value $l -Encoding UTF8 }
+function Get-Canal {
+    # Channel config is NEVER stored in the repo: env vars first, then the local file outside the repo.
+    $srv = $env:HIVEMIND_SERVER; $top = $env:HIVEMIND_TOPIC
+    if (-not ($srv -and $top)) {
+        try { $c = Get-Content 'C:\hivemind\canal.local.json' -Raw | ConvertFrom-Json; if (-not $srv) { $srv = $c.server }; if (-not $top) { $top = $c.topic } } catch {}
+    }
+    return @{ server = $srv; topic = $top }
+}
 function Send-Canal($tipo, $txt) {
-    try { & powershell -NoProfile -ExecutionPolicy Bypass -File C:\hivemind\agent\windows\send.ps1 -Server $env:HIVEMIND_SERVER -Topic $env:HIVEMIND_TOPIC -From claude-culiacan -To hermann -Type $tipo -Body ($txt -replace '"','') | Out-Null } catch {}
+    $c = Get-Canal
+    if (-not ($c.server -and $c.topic)) { Log "canal no configurado; mensaje no enviado: $txt"; return }
+    try { & powershell -NoProfile -ExecutionPolicy Bypass -File C:\hivemind\agent\windows\send.ps1 -Server $c.server -Topic $c.topic -From claude-culiacan -To hermann -Type $tipo -Body ($txt -replace '"','') | Out-Null } catch {}
 }
 
 # ---- single instance lock ----

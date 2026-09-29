@@ -1,0 +1,15 @@
+{
+  "scenario": "H_best",
+  "epsg": 32614,
+  "origin_easting": 370450.0,
+  "origin_northing": 2837950.0,
+  "origin_lon": -100.29066353726196,
+  "origin_lat": 25.65355556778036,
+  "zoi_half_size_m": 425.0,
+  "ring_half_size_m": 545.0,
+  "H_ref": 85.21875,
+  "H_ref_source": "google_25d",
+  "H_ref_osm_id": 546653067,
+  "H_max": 85.21875,
+  "frame": "ZT-ENU (x=East,y=North,z=Up; ground z=0)"
+}

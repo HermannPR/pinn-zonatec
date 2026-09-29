@@ -1,0 +1,33 @@
+name: smoke_deeponet
+out_dir: ml/runs/smoke/20260928_165411/deeponet
+data:
+  data_dir: data/synthetic
+  manifest: data/synthetic/manifest.csv
+  h_ref: 25.0
+  points_per_epoch: 4096
+  collocation_per_epoch: 2048
+  wall_points_per_epoch: 512
+  seed: 0
+features:
+  num_fourier_bands: 8
+  fourier_sigma: 4.0
+  variant_embedding_dim: 4
+model:
+  kind: deeponet
+  activation: tanh
+physics:
+  stage: A
+  nu: 1.5e-5
+  pressure_includes_two_thirds_k: false
+loss_weights:
+  mode: fixed
+  w_data: 1.0
+train:
+  epochs: 60
+  steps_per_epoch: 15
+  optimizer: adam
+  lr: 1.0e-3
+  device: cuda
+  amp: false
+  grad_clip: 1.0
+  log_every: 10

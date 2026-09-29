@@ -11,3 +11,14 @@ node_modules/
 video/wind-pinn.mp4
 video/wind-pinn-web.mp4
 video/texto
+
+# v2: datos pesados fuera de git (viven en E:\PINN\v2\data, E:\PINN\runs o D:)
+v2/data/
+v2/**/runs/
+*.h5
+*.npz
+*.npy
+*.stl
+*.parquet
+*.pt
+

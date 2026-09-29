@@ -1,0 +1,10 @@
+{
+  "x0": -545.0,
+  "y0": -545.0,
+  "resolution": 1.0,
+  "nx": 1090,
+  "ny": 1090,
+  "frame": "ZT-ENU",
+  "units": "m",
+  "value": "building height above ground (0=no building)"
+}

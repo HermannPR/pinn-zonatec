@@ -1,0 +1,3 @@
+scenario,H_max_m,H_ref_m,domain_length_min_max_m,domain_width_min_max_m,domain_height_m,blockage_min_max,circular_radius_m,circular_height_m,circular_blockage_worst,z0_macdonald_min_max_m,d_macdonald_min_max_m,z0_kanda_min_max_m,d_kanda_min_max_m
+H_best,85.2,85.2,2835-3202,1983-2350,511.3125,0.026-0.029,2049.0,511.0,0.0155,0.050-0.322,1.57-4.66,0.040-0.421,3.82-14.20
+H_osm,54.0,54.0,2211-2578,1671-2038,324.0,0.027-0.030,1581.0,324.0,0.0184,0.079-0.267,1.96-4.79,0.067-0.197,4.15-8.67

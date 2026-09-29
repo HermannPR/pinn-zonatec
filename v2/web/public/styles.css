@@ -1,0 +1,126 @@
+/* PINN Zona Tec -- v2 web app styles. Dark theme, palette chrome from the
+   project's data-viz reference palette (blue/red diverging, neutral grays). */
+:root {
+  color-scheme: dark;
+  --bg: #0b0f14;
+  --surface: #121822;
+  --surface-2: #182031;
+  --border: rgba(255,255,255,0.10);
+  --text: #f4f6f8;
+  --text-secondary: #c3c2b7;
+  --muted: #8b93a1;
+  --accent: #59d8ff;
+  --blue: #3987e5;
+  --red: #e34948;
+  --good: #0ca30c;
+  --warning: #fab219;
+  --serious: #ec835a;
+  --critical: #d03b3b;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+
+.top {
+  padding: 14px 20px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.brand h1 { margin: 0 0 4px; font-size: 1.4rem; }
+.brand .accent { color: var(--accent); }
+.brand .sub { margin: 0; color: var(--text-secondary); font-size: 0.88rem; max-width: 70ch; }
+
+.synthetic-banner {
+  margin-top: 8px;
+  background: linear-gradient(90deg, rgba(250,178,25,0.18), rgba(250,178,25,0.06));
+  border: 1px solid var(--warning);
+  color: #ffd98a;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  grid-template-rows: auto auto;
+  gap: 14px;
+  padding: 14px;
+}
+
+.mapcard { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; min-height: 60vh; }
+#map { flex: 1; min-height: 60vh; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
+.status-line { margin: 6px 0 2px; font-size: 0.8rem; color: var(--muted); }
+.attrib-line { margin: 0; font-size: 0.7rem; color: var(--muted); }
+
+.side { grid-column: 2; grid-row: 1 / span 2; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: calc(100vh - 40px); }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+}
+.card h2 { margin: 0 0 10px; font-size: 1rem; }
+.card h3 { margin: 0 0 6px; font-size: 0.92rem; }
+.muted { color: var(--muted); }
+.small { font-size: 0.8rem; }
+
+.field { display: block; margin-bottom: 12px; font-size: 0.85rem; }
+.field > span { display: block; margin-bottom: 4px; color: var(--text-secondary); }
+.field select, .field input[type=number] {
+  width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--text); font-size: 0.9rem;
+}
+.field input[type=range] { width: 100%; }
+
+.coord-readout { font-size: 0.78rem; color: var(--muted); margin: 0; }
+
+.out-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.out-table td { padding: 5px 4px; border-bottom: 1px solid var(--border); }
+.out-table td:first-child { color: var(--text-secondary); }
+.out-table td:last-child { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+
+#polar-chart { display: block; margin: 0 auto; max-width: 100%; }
+
+.mini-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; margin-bottom: 6px; }
+.mini-table th, .mini-table td { padding: 4px 6px; border-bottom: 1px solid var(--border); text-align: left; }
+.mini-table-caption { font-size: 0.78rem; color: var(--muted); margin: 6px 0 4px; }
+.mini-table .ok { color: var(--good); font-weight: 600; }
+.mini-table .fail { color: var(--critical); font-weight: 600; }
+
+.comfort-badge {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+  padding: 8px 10px; border-radius: 8px; background: var(--surface-2);
+  border-left: 4px solid var(--badge-color, var(--accent));
+}
+.comfort-badge-letter { font-size: 1.6rem; font-weight: 800; color: var(--badge-color, var(--accent)); }
+.comfort-badge-desc { font-size: 0.78rem; color: var(--text-secondary); }
+
+.explain { grid-column: 1 / span 2; grid-row: 3; }
+.about-toggle {
+  width: 100%; text-align: left; background: none; border: none; color: var(--text);
+  font-size: 1rem; font-weight: 700; cursor: pointer; padding: 4px 0;
+}
+.about-body { display: none; margin-top: 10px; }
+#about-panel.open .about-body { display: block; }
+.cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.cols p, .cols ul { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.4; }
+.cols ul { padding-left: 18px; }
+
+.pin-marker {
+  width: 16px; height: 16px; border-radius: 50% 50% 50% 0;
+  background: var(--accent); border: 2px solid #fff; transform: rotate(-45deg);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+}
+
+.foot { text-align: center; padding: 10px; }
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .mapcard { grid-column: 1; grid-row: 1; }
+  .side { grid-column: 1; grid-row: 2; max-height: none; }
+  .explain { grid-column: 1; grid-row: 3; }
+  .cols { grid-template-columns: 1fr; }
+  #map { min-height: 50vh; }
+}

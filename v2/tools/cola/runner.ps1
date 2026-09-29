@@ -28,7 +28,7 @@ function Get-Canal {
 function Send-Canal($tipo, $txt) {
     $c = Get-Canal
     if (-not ($c.server -and $c.topic)) { Log "canal no configurado; mensaje no enviado: $txt"; return }
-    try { & powershell -NoProfile -ExecutionPolicy Bypass -File C:\hivemind\agent\windows\send.ps1 -Server $c.server -Topic $c.topic -From claude-culiacan -To hermann -Type $tipo -Body ($txt -replace '"','') | Out-Null } catch {}
+    try { & powershell -NoProfile -ExecutionPolicy Bypass -File C:\hivemind\agent\windows\send.ps1 -Server $c.server -Topic $c.topic -From claude-cln -To hermann -Type $tipo -Body ($txt -replace '"','') | Out-Null } catch {}
 }
 
 # ---- single instance lock ----

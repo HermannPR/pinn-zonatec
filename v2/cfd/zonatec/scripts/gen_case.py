@@ -249,7 +249,7 @@ cache {{ grad(U); }}
 def control_dict(model: str, probes, stations, Htop: float, write: int, has_bld: bool) -> str:
     T = tv(model)
     pr = "\n".join(f"            ({x:.3f} {y:.3f} {z:.3f})" for x, y, z in probes)
-    st = "\n".join(f"            {n} {{ type uniform; axis z; start ({x:.3f} {y:.3f} 0.1); end ({x:.3f} {y:.3f} {Htop - 1:.2f}); nPoints 600; }}"
+    st = "\n".join(f"            {n} {{ type midPoint; axis z; start ({x:.3f} {y:.3f} 0.01); end ({x:.3f} {y:.3f} {Htop - 0.01:.2f}); }}"
                    for n, (x, y) in stations.items())
     mass = "\n".join(
         f"    flux_{pn}\n    {{\n        type surfaceFieldValue; libs (fieldFunctionObjects); writeControl timeStep; "
@@ -494,8 +494,12 @@ def main():
         coeffs = f"    realizableKECoeffs\n    {{\n        sigmaEps {a.sigma_eps};\n    }}\n"
     foam(case / "constant" / "turbulenceProperties", "dictionary", "turbulenceProperties",
          f"simulationType RAS;\nRAS\n{{\n    RASModel        {a.model};\n    turbulence      on;\n    printCoeffs     on;\n{coeffs}}}\n", GEN)
-    extract = ("echo 'extraction disabled for this case'" if (a.no_extract or not has_bld)
-               else f"$PY $SC/extract_h5.py . 2>&1 | tee log.extract")
+    if not has_bld:
+        extract = "echo 'extraction disabled (empty domain)'; $PY $SC/homogeneity_zt.py . 2>&1 | tee log.homogeneity || true"
+    elif a.no_extract:
+        extract = "echo 'extraction disabled for this case'"
+    else:
+        extract = "$PY $SC/extract_h5.py . 2>&1 | tee log.extract"
     write_text(case / "Allrun", ALLRUN.format(name=case.name, np=a.np, py=PY_UNIX, sc=SCRIPTS_UNIX,
                                               mesh=to_unix(mesh), warm=to_unix(a.warm_from) if a.warm_from else "",
                                               stage1=stage1, endt=a.end, chunk=a.chunk, tv=T, write=a.write,

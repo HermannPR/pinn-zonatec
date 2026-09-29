@@ -12,14 +12,59 @@ Documento para que cualquiera sepa qué está pasando. La parte automática la r
 | Campo | Valor |
 |---|---|
 | Fase | F1 validacion AIJ |
-| Caso | 022_aij_bld_ske_M |
-| Progreso | 2/3 |
-| Detalle | intento 1/3; activo: mpiexec,python,simpleFoam; time step continuity errors : sum local = 2.2572556e-07, global = -6.8615095e-08, cumulative = 0.010365736 |
+| Caso | 023_aij_bld_sst_M_mean |
+| Progreso | 3/9 |
+| Detalle | intento 1/2; arrancando |
 | Corriendo | True |
 | Proceso | bash |
-| Log | `E:\PINN\logs\jobs\022_aij_bld_ske_M.log` |
-| Último latido | 2026-09-28T23:52:48 |
+| Log | `E:\PINN\logs\jobs\023_aij_bld_sst_M_mean.log` |
+| Último latido | 2026-09-29T00:34:52 |
 <!-- AUTO:END -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

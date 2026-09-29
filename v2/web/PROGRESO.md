@@ -66,17 +66,34 @@ lo que no deberia haber colision. `E:\PINN\estado.json` no se toca.
 
 ## Estado (ir marcando)
 - [x] Exploracion / lectura de contrato y codigo existente.
-- [ ] build/export_model.py
-- [ ] build/build_geometry_assets.py (buildings.geojson + grids SDF/altura)
-- [ ] build/build_climate_assets.py (windrose_16.json + roughness sectors)
-- [ ] build/build_scene.py (frame/escena)
-- [ ] JS: model.js, features.js, climate.js (puertos)
-- [ ] worker.js (heatmap en background)
-- [ ] map.js + ui.js + index.html + styles.css (UI, reusa v1 donde aplica)
-- [ ] tests/ (Python genera vectores de referencia; Node verifica JS)
-- [ ] Servir con http.server 8777 y verificar carga sin errores
-- [ ] README.md (espanol)
-- [ ] Reporte final a Hermann/usuario
+- [x] build/export_model.py (checkpoint smoke stageC_fixed -> model.json, 215.7 KB)
+- [x] build/build_geometry_assets.py (buildings.geojson 315 huellas/1.29 MB;
+      sdf_fine.bin 1.86 MB + sdf_coarse.bin 0.49 MB + height_grid.bin 0.58 MB,
+      re-muestreados del sdf_grid_base.npz/height_raster_smooth_s5.npy reales)
+- [x] build/build_climate_assets.py (climate.json: 16 sectores, windrose_16.csv +
+      roughness_16sectors_overture.csv metodo macdonald)
+- [x] build/build_scene.py (scene.json: H_ref real 87.75 m, rangos UI)
+- [x] JS: model.js, features.js, climate.js, geo.js, core.js (puertos)
+- [x] worker.js (heatmap en background, module Web Worker)
+- [x] map.js + ui.js + index.html + styles.css (MapLibre 6.11.2 via CDN,
+      OSM raster + atribucion, extrusion 3D por altura, panel lateral,
+      chart polar K de 16 sectores, tablas NEN8100/Lawson, banner sintetico,
+      panel Acerca de/Fuentes)
+- [x] tests/ (gen_reference.py + test_model.mjs, test_features.mjs,
+      test_climate.mjs, run_all.mjs) -- TODAS PASAN:
+      modelo max|diff|=1.06e-15 (tol 1e-5), features max|diff|=3.6e-3 m SDF /
+      4.0e-3 m altura (tol cuantizacion 5e-3 m), clima max|diff|=2.2e-16 +
+      0 mismatches de clase + transfer.py exacto en los 16 sectores.
+- [x] Servir con http.server y verificar las 19 rutas (HTML/CSS/JS/data) con 200,
+      node --check en los 9 modulos + app.js sin errores de sintaxis.
+      (No se pudo abrir un navegador real en este entorno -- brecha
+      declarada en README.md seccion 8.)
+- [x] README.md (espanol): build, run, swap de modelo, resultados de
+      pruebas, tamano del paquete (~4.5 MB), brechas conocidas.
+- [x] Reporte final a Hermann/usuario.
+
+Sesion cerrada, sin pendientes de esta lista. Ver README.md seccion 8 para
+brechas conocidas (banco de trabajo futuro).
 
 ## Como continuar si esta sesion se interrumpe
 1. Revisar la lista de arriba, retomar en el primer `[ ]`.

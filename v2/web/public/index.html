@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="es-MX">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Viento en Zona Tec -- PINN</title>
+  <meta name="description" content="Predicción del viento peatonal en Zona Tec (Tec de Monterrey + Distrito Tec) con una red neuronal informada por la física, corriendo en tu navegador.">
+  <meta name="theme-color" content="#0b0f14">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230b0f14'/><path d='M5 11h15a4 4 0 1 0-4-4M5 17h20a4 4 0 1 1-4 4M5 23h9' stroke='%2359d8ff' stroke-width='2.6' fill='none' stroke-linecap='round'/></svg>">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@6.11.2/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <h1>Viento en <span class="accent">Zona Tec</span></h1>
+      <p class="sub">Red neuronal informada por la física (PINN) entrenada con CFD, evaluada en tu navegador. Elige un punto, una altura y una dirección de viento.</p>
+    </div>
+    <div id="synthetic-banner" class="synthetic-banner" hidden></div>
+  </header>
+
+  <main class="layout">
+    <section class="mapcard">
+      <div id="map"></div>
+      <p class="status-line" id="status-line">Cargando...</p>
+      <p class="attrib-line">Mapa: OpenStreetMap contributors (ODbL) &middot; Edificios: Google Open Buildings (CC BY 4.0) + OSM &middot; Clima: NOAA ISD (MMMY)</p>
+    </section>
+
+    <aside class="side">
+      <section class="card">
+        <h2>Controles</h2>
+        <label class="field">
+          <span>Direccion de viento (de donde viene)</span>
+          <select id="direction-select"></select>
+        </label>
+        <label class="field">
+          <span>Altura de consulta z: <b id="z-value">-</b></span>
+          <input type="range" id="z-slider">
+        </label>
+        <label class="field">
+          <span>U10 de referencia (viento abierto, aeropuerto)</span>
+          <input type="number" id="u10-input" min="0.5" max="30" step="0.5"> m/s
+        </label>
+        <label class="field">
+          <span>Mapa de calor:</span>
+          <select id="heatmap-field">
+            <option value="K">K = U_local / U10 (amplificacion)</option>
+            <option value="speed">Velocidad media (m/s)</option>
+            <option value="turbulence">Intensidad de turbulencia I</option>
+          </select>
+        </label>
+        <p class="coord-readout" id="coord-readout">Haz clic en el mapa para elegir un punto.</p>
+      </section>
+
+      <section class="card" id="single-direction-block" hidden>
+        <h2>Viento en el punto</h2>
+        <table class="out-table">
+          <tr><td>Velocidad media</td><td id="out-speed">-</td></tr>
+          <tr><td>Direccion local</td><td id="out-dir">-</td></tr>
+          <tr><td>K = U_local/U10</td><td id="out-k">-</td></tr>
+          <tr><td>Intensidad turbulencia I<br><small>(estimacion RANS, isotropia supuesta)</small></td><td id="out-turb">-</td></tr>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>K por direccion (16 sectores)</h2>
+        <canvas id="polar-chart" width="280" height="280"></canvas>
+      </section>
+
+      <section class="card">
+        <h2>Confort peatonal NEN 8100</h2>
+        <p class="muted small">Combina K(&theta;) del punto con la rosa de vientos de Monterrey (16 sectores, MMMY).</p>
+        <div id="nen8100-block"></div>
+      </section>
+
+      <section class="card">
+        <h2>Confort peatonal Lawson (LDDC)</h2>
+        <div id="lawson-block"></div>
+      </section>
+    </aside>
+
+    <section class="card explain" id="about-panel">
+      <button id="about-toggle" class="about-toggle">Acerca de / Fuentes ▾</button>
+      <div class="about-body">
+        <div class="cols">
+          <div>
+            <h3>Que es esto</h3>
+            <p>Una red neuronal informada por la fisica (PINN) predice el campo de viento medio 3D alrededor de Zona Tec (campus Tec de Monterrey + Distrito Tec, Monterrey), entrenada con simulaciones CFD (RANS, estado estacionario). Toda la inferencia corre en JavaScript puro dentro de tu navegador -- no hay servidor.</p>
+          </div>
+          <div>
+            <h3>Limitaciones honestas</h3>
+            <ul>
+              <li>Entrenada sobre CFD RANS de estabilidad <b>neutra</b> unicamente (sin efectos termicos dia/noche).</li>
+              <li>No incluye vegetacion (arboles) en la geometria base.</li>
+              <li>La turbulencia (k, intensidad I) es una <b>estimacion</b> que asume isotropia (I=sqrt(2k/3)/U); RANS no resuelve rafagas reales.</li>
+              <li>El confort peatonal combina esta K con la climatologia medida en el aeropuerto (MMMY, NOAA ISD) via una transferencia de rugosidad de dos capas -- no hay mediciones de viento dentro del campus.</li>
+              <li>Los criterios NEN 8100 y Lawson LDDC reproducidos aqui vienen de un resumen secundario, no del texto impreso de las normas (ver <code>climate/windclimate.py</code>).</li>
+            </ul>
+          </div>
+          <div>
+            <h3>Fuentes de datos</h3>
+            <ul>
+              <li><b>OpenStreetMap</b> -- huellas de edificios y mapa base (ODbL).</li>
+              <li><b>Google Open Buildings</b> (2.5D) -- alturas de edificios donde OSM subestima torres (CC BY 4.0).</li>
+              <li><b>NOAA ISD</b> -- registro horario de viento del aeropuerto de Monterrey (MMMY), climatologia de 16 sectores.</li>
+              <li><b>OpenFOAM</b> (simpleFoam, RANS k-&epsilon;/k-&omega; SST) -- datos de entrenamiento de la red (cuando esten disponibles; ver banner de modelo de prueba).</li>
+            </ul>
+          </div>
+        </div>
+        <p class="small muted" id="model-source-line"></p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot small muted">Inferencia de la red 100% en tu navegador (JavaScript puro, sin servidor). Proyecto PINN Zona Tec.</footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@6.11.2/dist/maplibre-gl.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -11,7 +11,7 @@ while (-not (Test-Path $stop)) {
     $p = @(Get-Process -Name $Names -ErrorAction SilentlyContinue)
     $ws = [math]::Round((($p | Measure-Object WorkingSet64 -Sum).Sum) / 1MB, 0)
     $pv = [math]::Round((($p | Measure-Object PrivateMemorySize64 -Sum).Sum) / 1MB, 0)
-    $av = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024, 0)
+    $av = [int](Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableMBytes
     "$(Get-Date -Format s),$ws,$pv,$av,$($p.Count)" | Add-Content $csv
     if ($ws -gt $peakWS) { $peakWS = $ws }; if ($pv -gt $peakPriv) { $peakPriv = $pv }
     if ($p.Count -gt 0 -and $av -lt $minAvail) { $minAvail = $av }

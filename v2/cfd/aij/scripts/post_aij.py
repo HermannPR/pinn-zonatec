@@ -37,6 +37,13 @@ LIT = {  # Tominaga et al. (2004) JAABE 3(1) 63-70, Table 1 (AIJ cross compariso
     "LES with inflow turbulence (LES2)": {"XR": "0.50", "XF": "2.10"},
     "Experiment (Ishihara & Hibi 1998)": {"XR": "0.52", "XF": "1.42"},
 }
+MEAN = {"on": False}   # --mean: read the fieldAverage sets (<name>Mean dirs) written by add_mean_sampling.py
+
+
+def pp(case: Path, name: str) -> Path:
+    return case / "postProcessing" / (name + ("Mean" if MEAN["on"] and (case / "postProcessing" / (name + "Mean")).exists() else ""))
+
+
 MODEL_STYLE = {  # colour (validated default categorical order) + dash as secondary encoding
     "realizableKE": ("#2a78d6", "-"), "kOmegaSST": ("#eb6834", "--"), "kEpsilon": ("#1baf7a", ":")}
 
@@ -60,7 +67,7 @@ def read_set(dirp: Path, name: str) -> pd.DataFrame | None:
     df = None
     for f in files:
         d = pd.read_csv(f)
-        d.columns = [c.strip().lstrip("#").strip() for c in d.columns]
+        d.columns = [c.strip().lstrip("#").strip().replace("Mean", "") for c in d.columns]
         if df is None:
             df = d
         else:
@@ -147,7 +154,7 @@ def process_case(case: Path) -> dict:
     meta = json.loads((case / "case.json").read_text())
     UH = meta["U_H"]
     e = pd.read_csv(PROC / "exp_points.csv")
-    tdir = latest_dir(case / "postProcessing" / "sampleExp")
+    tdir = latest_dir(pp(case, "sampleExp"))
     s = read_set(tdir, "expPoints")
     # match by coordinates
     xyz = s[["x", "y", "z"]].to_numpy()
@@ -167,7 +174,8 @@ def process_case(case: Path) -> dict:
     e["Sc"] = np.sqrt(e.Uc ** 2 + e.Vc ** 2 + e.Wc ** 2)
     e["So"] = e.Umag_UH
     res = {"case": case.name, "model": meta["model"], "level": meta["level"], "ncells": meta["mesh"]["ncells"],
-           "n_points": int(ok.sum()), "time_dir": tdir.name}
+           "n_points": int(ok.sum()), "time_dir": tdir.name,
+           "averaged": meta.get("mean_average") if tdir.parent.name.endswith("Mean") else None}
     for W in (0.0, 0.05, 0.10):
         tag = f"W{W:.2f}"
         res[f"q_U_{tag}"] = hit_rate(e.Uc, e.Uo, W=W)
@@ -191,7 +199,7 @@ def process_case(case: Path) -> dict:
     for k, v in chang_hanna(e.kc, e.k_UH2).items():
         res[f"k_{k}"] = v
     # reattachment
-    ldir = latest_dir(case / "postProcessing" / "sampleLines")
+    ldir = latest_dir(pp(case, "sampleLines"))
     roof, wake, front = read_set(ldir, "roof"), read_set(ldir, "wake"), read_set(ldir, "front")
     xr = None
     if roof is not None:
@@ -236,7 +244,7 @@ def plots(cases: list[Path], out: Path, tag: str):
         ev = e0[(e0.set == "vert") & np.isclose(e0.x_b, s)]
         for c in cases:
             meta = json.loads((c / "case.json").read_text())
-            d = read_set(latest_dir(c / "postProcessing" / "sampleProfiles"), f"v{i}")
+            d = read_set(latest_dir(pp(c, "sampleProfiles")), f"v{i}")
             if d is None:
                 continue
             col, ls = MODEL_STYLE.get(meta["model"], ("#4a3aa7", "-"))
@@ -260,7 +268,7 @@ def plots(cases: list[Path], out: Path, tag: str):
         eh = e0[(e0.set == "h0125") & np.isclose(e0.x_b, s)]
         for c in cases:
             meta = json.loads((c / "case.json").read_text())
-            d = read_set(latest_dir(c / "postProcessing" / "sampleProfiles"), f"ha{i}")
+            d = read_set(latest_dir(pp(c, "sampleProfiles")), f"ha{i}")
             if d is None:
                 continue
             col, ls = MODEL_STYLE.get(meta["model"], ("#4a3aa7", "-"))
@@ -305,7 +313,9 @@ def main():
     ap.add_argument("--tag", default="M")
     ap.add_argument("--out", default=str(HERE.parent / "results"))
     ap.add_argument("--figs", default="E:/PINN/runs/aij/figs")
+    ap.add_argument("--mean", action="store_true", help="use pseudo-time averaged sets where available")
     a = ap.parse_args()
+    MEAN["on"] = a.mean
     out, figs = Path(a.out), Path(a.figs)
     out.mkdir(parents=True, exist_ok=True)
     figs.mkdir(parents=True, exist_ok=True)

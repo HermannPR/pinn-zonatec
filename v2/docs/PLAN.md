@@ -1,6 +1,6 @@
 # PLAN — PINN Zona Tec v2
 
-Líder: claude-culiacan (PC Culiacán). Base: `DECISIONES.md` (respuestas vinculantes P1-P29) y `v2/docs/DATA_CONTRACT.md` (marco de coordenadas, convención de dirección y formato de datos).
+Líder: claude-cln (antes claude-culiacan; PC Culiacán). Integración en GitHub: claude-mty. Base: `DECISIONES.md` (respuestas vinculantes P1-P29) y `v2/docs/DATA_CONTRACT.md` (marco de coordenadas, convención de dirección y formato de datos).
 Estado: **v1.0 del 28-sep-2026**. Las cifras marcadas [estimado] se recalculan con las mediciones piloto (benchmark de OpenFOAM, malla piloto) y quedan registradas en la sección 7.
 
 ## 1. Qué se construye (una frase)
@@ -86,10 +86,10 @@ Informe (métodos, validación, incertidumbre, limitaciones: neutralidad, sin á
 
 ## 4. Presupuesto de cómputo en ESTA PC (Ryzen 5 5600X 6c/12t, 16 GB, RTX 3070 8 GB)
 - **RAM:** snappyHexMesh es lo que más memoria pide (del orden de 1 a 2 GB por millón de celdas, más un pico en la fase de capas) [estimado]. simpleFoam con k-ε usa ~1 GB por millón de celdas [estimado]. Con 16 GB y Windows más los otros procesos, el techo seguro es de **~4 M de celdas**, y el objetivo es **~3 M**.
-- **Malla objetivo [estimado]:** dominio de unos 2.0 × 1.4 × 0.4 km para H_max ~ 60-70 m (COST 732: 5H / 15H). Fondo de 8 a 16 m; zona central (campus) con celdas horizontales de 2 m y graduación vertical desde ~0.5 m; anillo exterior de 4 m. Total ~2.5 a 3.5 M.
-- **Tiempo [estimado, a medir]:** simpleFoam en 6 procesos, ~3 M de celdas: 3 a 6 s por iteración, con 2000 a 3000 iteraciones → **3 a 5 h por caso**, más ~0.5 a 1 h de mallado. **38 casos ≈ 150 a 230 h de CPU ≈ 7 a 10 días continuos**, o unas 3 a 4 semanas solo de noches y fines de semana. Cabe en P1-C.
-- Si solo hubiera ejecución en serie (sin MPI), el tiempo se multiplica por ~4 a 5. En ese caso se reduce a ~1.5 M de celdas y se pide a Hermann habilitar WSL2 o MS-MPI.
-- **Plan recortado (adoptado el 28-sep, comunicado a Hermann):** un dominio circular por geometría (3 mallas en vez de 38); ~2-2.5 M de celdas justificadas con GCI; arranque en caliente desde la dirección vecina o desde la solución base (30-60 % menos iteraciones); velocidades extra reiniciadas desde la base (~500 iteraciones); ejecución 24/7 en prioridad baja. Estimación: AIJ 6-8 h + GCI ~6 h + 16 direcciones 35-40 h + velocidades ~2 h + variantes 20-25 h ≈ **70-80 h de reloj (3-4 días 24/7)** [estimado; se recalcula con el benchmark]. No sirve: simetría (la geometría no es simétrica) ni correr 2 casos a la vez (RAM y ancho de banda). Nube gratis: Colab/Kaggle solo para entrenar; Oracle Always Free (4 núcleos ARM, 24 GB) como opción de CFD no verificada.
+- **Malla (vigente):** dominio circular con R ≈ 2049 m y 511 m de alto (H_best, H_max = 85 m; COST 732 con 15 H en todas direcciones; bloqueo del 1.55 %). ~3.5-4.5 M de celdas: 2 m en la zona de evaluación cerca del suelo, primeras celdas de ~0.5 m, refinamiento alrededor de las torres.
+- **ESTIMACIÓN VIGENTE (con benchmark; el único número que se cita):** **~80-110 h de reloj ≈ 3.5-5 días 24/7** para la campaña completa, con el plan recortado (ver §7). Se confirma con el piloto de 112.5°. Las cifras previas de 7-10 días (plan sin recortes) y de 70-80 h (antes del benchmark) están **superadas** y no se citan.
+- MPI de 6 procesos funciona (sin administrador), así que no aplica el escenario de solo serie.
+- **Plan recortado (adoptado el 28-sep, comunicado a Hermann):** un dominio circular por geometría (3 mallas en vez de 38); malla justificada con GCI; arranque en caliente desde la dirección vecina o desde la solución base (30-60 % menos iteraciones); velocidades extra reiniciadas desde la base (~500 iteraciones); ejecución 24/7 en prioridad baja por la cola a prueba de fallas. No sirve: simetría (la geometría no es simétrica) ni correr 2 casos a la vez (RAM y ancho de banda). Nube gratis: Colab/Kaggle solo para entrenar; Oracle Always Free (4 núcleos ARM, 24 GB) como opción de CFD no verificada.
 - **Riesgo de CPU compartida:** el trabajo de `recaps` compite por la CPU. Las corridas largas se lanzan con prioridad BelowNormal y se registran los tiempos reales.
 - **No hay otra máquina** (sin RTX 4090). Kaggle o Colab gratis quedan como desborde opcional para entrenamiento, nunca en la ruta crítica. OpenFOAM se queda local.
 - **GPU:** entrenamiento con < 4 a 5 GB de VRAM (por ComfyUI y Ollama). La etapa C (autograd de segundo orden) es la más cara: se estima de 1 a 4 h por entrenamiento [estimado].

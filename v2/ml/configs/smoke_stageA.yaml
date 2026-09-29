@@ -1,5 +1,5 @@
 name: smoke_stageA
-out_dir: ml/runs/smoke/20260928_165411/stageA
+out_dir: ml/runs/smoke/20260928_195807/stageA
 data:
   data_dir: data/synthetic
   manifest: data/synthetic/manifest.csv

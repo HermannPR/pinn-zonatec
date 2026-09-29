@@ -53,6 +53,9 @@ class ModelConfig:
     hidden_layers: List[int] = dataclasses.field(default_factory=lambda: [128, 128, 128, 128])
     activation: str = "tanh"
     output_kind_positive: str = "softplus"  # for k, nut >= 0
+    sdf_wall_scale: float = 10.0  # metres; M13, decoupled from h_ref
+    nut_scale: float = 0.01  # M1: keeps nut_nd ~ physical scale at init, not softplus(0)~0.69
+    k_scale: float = 1.0
 
 
 @dataclasses.dataclass
@@ -66,9 +69,12 @@ class PhysicsConfig:
 
 @dataclasses.dataclass
 class LossWeightConfig:
-    mode: str = "fixed"  # "fixed" | "lra" (learning-rate annealing, Wang et al. 2021)
+    mode: str = "fixed"  # "fixed" | "lra" (gradient-norm learning-rate annealing, M2)
     lra_alpha: float = 0.9
-    lra_every: int = 20
+    lra_every: int = 100  # M2: update cadence (was 20; too frequent given noisy per-batch grad norms)
+    lra_cap_lo: float = 1e-2  # M2: bounds are relative to each term's initial fixed weight
+    lra_cap_hi: float = 1e2
+    lra_warmup_steps: int = 1000  # M2: physics weights ramp 0->w over this many steps before LRA engages
     w_data: float = 1.0
     w_continuity: float = 1.0
     w_momentum: float = 1.0
@@ -88,6 +94,12 @@ class TrainConfig:
     amp: bool = False  # must stay False for residual (autograd) terms per P26
     grad_clip: Optional[float] = 1.0
     log_every: int = 5
+    # estado.json is a single shared slot with the CFD job queue (E:\PINN\cola).
+    # Default False: short smoke/test runs must not touch it at all. Only a
+    # long run DISPATCHED THROUGH THE QUEUE as a kind=python job should set
+    # this true, and even then train.py only ever refreshes detalle/latido
+    # (never corriendo/fase/caso/proceso -- see train.py's _set_estado).
+    heartbeat: bool = False
 
 
 @dataclasses.dataclass
@@ -103,6 +115,12 @@ class ExperimentConfig:
     # optional: {name: checkpoint_path} of sibling runs (e.g. stage A, DeepONet)
     # to fold into this run's comparison_table.{csv,md} after training finishes.
     compare_checkpoints: Optional[Dict[str, str]] = None
+    # optional (M1.4, design review): warm-start this run's weights from a
+    # prior stage's checkpoint (e.g. stage C from a converged stage B) before
+    # training -- combined with the physics-weight ramp (LossWeightConfig.
+    # lra_warmup_steps), this avoids throwing the full, badly-scaled
+    # momentum residual at an untrained network from step 0.
+    warm_start_checkpoint: Optional[str] = None
 
 
 def _merge(dc_cls, d: Optional[Dict[str, Any]]):

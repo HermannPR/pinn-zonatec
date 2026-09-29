@@ -44,7 +44,8 @@ import torch
 
 from .config import KAPPA, CMU
 
-FIELD_NAMES = ["x", "y", "z", "u", "v", "w", "p", "k", "nut", "sdf", "wall_dist", "local_height"]
+FIELD_NAMES = ["x", "y", "z", "u", "v", "w", "p", "k", "nut", "sdf", "wall_dist", "local_height",
+               "vol", "is_wall_adjacent"]
 
 # Reference speed used to build the DeepONet branch input U10/Uref (P25=A
 # spec). Shared as a constant so training (EpochSampler) and evaluation
@@ -93,18 +94,40 @@ class CaseData:
     def n_wall(self) -> int:
         return self.wall["x"].shape[0] if self.wall else 0
 
+    @property
+    def fluid_idx(self) -> np.ndarray:
+        """Indices NOT in the first wall-adjacent cell layer (M6, design
+        review): the momentum/continuity residual is only meaningful where
+        the discretised PDE actually applies -- with wall functions, the
+        first cell's stress is set by the wall law, not by resolving the
+        continuum equation, so collocation points must exclude
+        `is_wall_adjacent==1` cells."""
+        if not hasattr(self, "_fluid_idx_cache"):
+            mask = self.arrays["is_wall_adjacent"] < 0.5
+            self._fluid_idx_cache = np.nonzero(mask)[0]
+        return self._fluid_idx_cache
+
     def sincos(self):
         th = np.deg2rad(self.theta_deg)
         return np.float32(np.sin(th)), np.float32(np.cos(th))
 
 
-def _load_case(path: str, variant_id: int) -> CaseData:
+def _load_case(path: str, variant_id: int, split: str) -> CaseData:
+    """`split` must come from the sealed manifest (see CaseStore), not from
+    the HDF5 file's own `split` attribute (M9, design review) -- the two
+    could silently disagree if a case file is regenerated without updating
+    the manifest."""
     with h5py.File(path, "r") as f:
         arrays = {name: f[name][...].astype(np.float32) for name in FIELD_NAMES}
         wall = {}
         if "wall_faces" in f:
             g = f["wall_faces"]
-            wall = {k: g[k][...].astype(np.float32) for k in ["x", "y", "z", "nx", "ny", "nz"]}
+            keys = ["x", "y", "z", "nx", "ny", "nz"]
+            if "height" in g:
+                keys.append("height")
+            wall = {k: g[k][...].astype(np.float32) for k in keys}
+            if "height" not in wall:
+                wall["height"] = np.zeros_like(wall["x"])  # legacy files without M7's fix
         attrs = dict(f.attrs)
     return CaseData(
         case_id=Path(path).stem,
@@ -117,27 +140,69 @@ def _load_case(path: str, variant_id: int) -> CaseData:
         d=float(attrs["d"]),
         h_ref=float(attrs["h_ref"]),
         u_h=float(attrs["u_h"]),
-        split=str(attrs.get("split", "unknown")),
+        split=split,
         arrays=arrays,
         wall=wall,
     )
 
 
+class ManifestSealError(RuntimeError):
+    pass
+
+
+def verify_manifest_seal(manifest_path: str, strict: bool = False) -> Optional[str]:
+    """Check manifest.csv against its manifest.csv.sha256 sidecar (M9,
+    design review: the split must be sealed so it can't silently drift).
+    Returns the verified digest, or None if no sidecar exists (older/hand-made
+    manifests) -- `strict=True` raises instead of tolerating a missing seal."""
+    import hashlib
+    sha_path = Path(str(manifest_path) + ".sha256")
+    if not sha_path.exists():
+        msg = f"no {sha_path} sidecar; split is unverified (run ml.synthetic.seal_manifest)"
+        if strict:
+            raise ManifestSealError(msg)
+        print(f"[data] WARNING: {msg}")
+        return None
+    expected = sha_path.read_text(encoding="utf-8").strip().split()[0]
+    actual = hashlib.sha256(Path(manifest_path).read_bytes()).hexdigest()
+    if actual != expected:
+        raise ManifestSealError(
+            f"{manifest_path} does not match {sha_path} (expected {expected[:12]}..., got {actual[:12]}...); "
+            "the manifest was edited/regenerated without re-sealing (ml.synthetic.seal_manifest)")
+    return actual
+
+
 class CaseStore:
     """Loads and caches all cases referenced by a manifest, non-dimensionalises
-    them, and exposes them keyed by case_id / split."""
+    them, and exposes them keyed by case_id / split. The split assignment is
+    read ONLY from the (SHA-256-sealed) manifest -- never from each HDF5
+    file's own `split` attribute (M9, design review)."""
 
-    def __init__(self, manifest_path: str):
+    def __init__(self, manifest_path: str, require_seal: bool = False):
         self.manifest_path = manifest_path
+        verify_manifest_seal(manifest_path, strict=require_seal)
         self.df = read_manifest(manifest_path)
         self.vocab = VariantVocab(self.df["variant"].tolist())
         self.cases: Dict[str, CaseData] = {}
         for _, row in self.df.iterrows():
             vid = self.vocab.id_of(row["variant"])
-            self.cases[row["case_id"]] = _load_case(row["path"], vid)
+            self.cases[row["case_id"]] = _load_case(row["path"], vid, str(row["split"]))
 
     def ids_for_split(self, split: str) -> List[str]:
         return [cid for cid, c in self.cases.items() if c.split == split]
+
+    def field_stats(self, split: str = "train",
+                     fields: List[str] = ("u", "v", "w", "p", "k", "nut")) -> Dict[str, float]:
+        """Per-field standard deviation of the NON-DIMENSIONAL fields over a
+        split (M5, design review): used to standardise the data loss so
+        low-variance fields (k, w, p in the smoke data) aren't drowned out
+        by high-variance ones (v) in a plain unweighted MSE sum."""
+        acc = {f: [] for f in fields}
+        for cid in self.ids_for_split(split):
+            nd = nondim_fields(self.cases[cid])
+            for f in fields:
+                acc[f].append(nd[f])
+        return {f: float(np.std(np.concatenate(v))) if v else 1.0 for f, v in acc.items()}
 
     def nearest_train_cases(self, target: CaseData, k: int = 1, same_variant: bool = True,
                              match_axis: str = "theta") -> List[CaseData]:
@@ -146,9 +211,16 @@ class CaseStore:
         (used for the held-out-direction baselines); match_axis='u10' ->
         same theta, sorted by |U10 - target.U10| (held-out-speed baseline).
         Falls back to an empty list if nothing matches (caller decides the
-        further fallback, e.g. relaxing same_variant)."""
+        further fallback, e.g. relaxing same_variant).
+
+        M9 (design review): restricted to split=='train' only. The network
+        never sees validation cases either, so a fair baseline can't either
+        -- letting baselines also draw on 'val' (as an earlier version did)
+        gave them strictly more information than the model they're compared
+        against.
+        """
         def base_filter(c):
-            return c.case_id != target.case_id and c.split in ("train", "val") and \
+            return c.case_id != target.case_id and c.split == "train" and \
                 (c.variant == target.variant if same_variant else True)
 
         if match_axis == "theta":
@@ -185,11 +257,12 @@ def nondim_fields(case: CaseData) -> Dict[str, np.ndarray]:
 class Batch:
     xyz: torch.Tensor          # [N,3] non-dim
     sincos: torch.Tensor       # [N,2]
-    variant_id: torch.Tensor   # [N] long
+    variant_id: torch.Tensor   # [N] long (unused by the models, M4; kept for bookkeeping/baselines)
     sdf_m: torch.Tensor        # [N,1] metres (raw)
     height_m: torch.Tensor     # [N,1] metres (raw)
     target: Dict[str, torch.Tensor]  # non-dim u,v,w,p,k,nut
-    u10_over_uref: torch.Tensor      # [N,1]
+    u10_over_uref: torch.Tensor      # [N,1] (unused by the models, M11; kept for bookkeeping)
+    vol_weight: Optional[torch.Tensor] = None  # [N] cell volume / mean(vol) within the batch (M6)
 
 
 class EpochSampler:
@@ -210,19 +283,31 @@ class EpochSampler:
         replace = n_want > n_available
         return self.rng.choice(n_available, size=n_want, replace=replace)
 
-    def sample_supervised(self, case_ids: List[str], n_per_case: int, requires_grad: bool = False) -> Batch:
-        xs, ys, zs, sins, coss, vids, sdfs, hts, u10s = ([] for _ in range(9))
+    def sample_supervised(self, case_ids: List[str], n_per_case: int, requires_grad: bool = False,
+                           fluid_only: bool = False) -> Batch:
+        """`fluid_only=True` (M6, design review) restricts sampling to
+        `case.fluid_idx` (excludes `is_wall_adjacent==1` cells) -- use this
+        for collocation batches feeding the continuity/momentum residual,
+        since the first wall-adjacent cell's stress comes from the wall
+        function, not from resolving the continuum PDE there. Also returns
+        `vol_weight` (cell volume normalised to a per-batch mean of 1) so the
+        residual loss can be volume-weighted (M6) instead of a plain
+        per-point mean that over-counts refined-mesh regions.
+        """
+        xs, ys, zs, sins, coss, vids, sdfs, hts, u10s, vols = ([] for _ in range(10))
         targets = {k: [] for k in ["u", "v", "w", "p", "k", "nut"]}
         for cid in case_ids:
             case = self.store.cases[cid]
             nd = nondim_fields(case)
-            idx = self._sample_idx(case.n_points, n_per_case)
+            pool = case.fluid_idx if fluid_only else np.arange(case.n_points)
+            idx = pool[self._sample_idx(len(pool), n_per_case)]
             s, c = case.sincos()
             xs.append(nd["x"][idx]); ys.append(nd["y"][idx]); zs.append(nd["z"][idx])
             sins.append(np.full(n_per_case, s, np.float32)); coss.append(np.full(n_per_case, c, np.float32))
             vids.append(np.full(n_per_case, case.variant_id, np.int64))
             sdfs.append(nd["sdf_m"][idx]); hts.append(nd["local_height_m"][idx])
             u10s.append(np.full(n_per_case, case.u10 / self.u10_ref, np.float32))
+            vols.append(case.arrays["vol"][idx])
             for k in targets:
                 targets[k].append(nd[k][idx])
         xyz = torch.tensor(np.stack([np.concatenate(xs), np.concatenate(ys), np.concatenate(zs)], axis=1),
@@ -235,10 +320,12 @@ class EpochSampler:
         u10_over_uref = torch.tensor(np.concatenate(u10s), dtype=torch.float32, device=self.device).view(-1, 1)
         target = {k: torch.tensor(np.concatenate(v), dtype=torch.float32, device=self.device)
                   for k, v in targets.items()}
+        vol_np = np.concatenate(vols)
+        vol_weight = torch.tensor(vol_np / max(vol_np.mean(), 1e-30), dtype=torch.float32, device=self.device)
         if requires_grad:
             xyz.requires_grad_(True)
             sdf_m, height_m = self.differentiable_geometry(case_ids, n_per_case, xyz, sdf_m, height_m)
-        return Batch(xyz, sincos, variant_id, sdf_m, height_m, target, u10_over_uref)
+        return Batch(xyz, sincos, variant_id, sdf_m, height_m, target, u10_over_uref, vol_weight)
 
     def differentiable_geometry(self, case_ids: List[str], n_per_case: int, xyz: torch.Tensor,
                                   fallback_sdf: torch.Tensor, fallback_height: torch.Tensor):
@@ -287,7 +374,12 @@ class EpochSampler:
             sins.append(np.full(n_per_case, s, np.float32)); coss.append(np.full(n_per_case, c, np.float32))
             vids.append(np.full(n_per_case, case.variant_id, np.int64))
             sdfm.append(np.zeros(n_per_case, np.float32))  # on-wall: sdf ~ 0 by construction
-            htm.append(np.zeros(n_per_case, np.float32))
+            # M7 (design review): use the TRUE building height at this face
+            # (0 for ground), not a hard-coded 0 everywhere -- a fluid point
+            # right next to a facade sees local_height == that building's H,
+            # so the wall point representing the same wall must too, or the
+            # network learns an inconsistent feature at the boundary.
+            htm.append(case.wall["height"][idx])
             u10s.append(np.full(n_per_case, case.u10 / self.u10_ref, np.float32))
         if not any_wall:
             return None

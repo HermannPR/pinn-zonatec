@@ -152,7 +152,7 @@ def test_sdf_module(out_dir):
     ok = sdf_mod._self_test()
     check("sdf.py self-test (box, positive-in-fluid convention)", ok)
 
-    base_path = os.path.join(out_dir, "zonatec_base.stl")
+    base_path = os.path.join(out_dir, "zonatec_base_multisolid.stl")
     frame = load_frame(out_dir)
     bsdf = sdf_mod.BuildingSDF(base_path)
     high_pt = np.array([[0.0, 0.0, frame["H_max"] + 100.0]])
@@ -162,14 +162,18 @@ def test_sdf_module(out_dir):
 
 def test_sdf_grids(out_dir):
     """Nested SDF grid npz files exist, are internally consistent, and their
-    trilinear interpolation matches the exact trimesh SDF at random points
-    to within a small multiple of the grid spacing (grid values come from a
-    fast analytic per-2D-nearest-footprint approximation, see sdf.py; a
-    couple of grid-cells' tolerance around sharp corners/edges is expected
-    and documented, not a bug)."""
+    trilinear interpolation matches the exact trimesh SDF (via the
+    *_multisolid.stl reference -- see sdf.BuildingSDF docstring on why the
+    single-solid file is not a reliable ground truth at party walls) at
+    random points to within a small multiple of the grid spacing. Grid
+    values now come from the EXACT prism-union method (F1 review G4), so
+    remaining error is pure trilinear-interpolation discretisation (a couple
+    of grid-cells' tolerance around sharp corners/edges), not an algorithmic
+    approximation."""
     for vname in ("base", "var1", "var2", "var3"):
         npz_path = os.path.join(out_dir, f"sdf_grid_{vname}.npz")
-        stl_path = os.path.join(out_dir, "zonatec_base.stl" if vname == "base" else f"zonatec_{vname}.stl")
+        base_name = "zonatec_base" if vname == "base" else f"zonatec_{vname}"
+        stl_path = os.path.join(out_dir, f"{base_name}_multisolid.stl")
         if not os.path.exists(npz_path):
             check(f"sdf_grid_{vname}.npz exists", False, "file missing")
             continue
@@ -197,12 +201,13 @@ def test_sdf_grids(out_dir):
                                            float(data["fine_res_xy"]), data["fine_z"], pts)
         err = np.abs(exact - interp)
         res = float(data["fine_res_xy"])
-        tol = 2.5 * res  # discretisation (EDT on a pixel-centre raster) has a
-                          # documented worst case of ~sqrt(2)*res at diagonal
-                          # corners; 2.5x gives headroom without masking real bugs
+        tol = 1.5 * res  # exact prism-union method (F1 review G4): remaining error
+                          # is pure trilinear-interpolation discretisation near
+                          # corners/edges, empirically <1 grid spacing typically
+                          # (max observed ~0.74 m at res=1 m); 1.5x gives headroom
         frac_ok = np.mean(err <= tol)
         check(f"sdf_grid_{vname}: trilinear interp matches exact SDF within {tol:.1f} m "
-              f"for >=90% of {n} random points", frac_ok >= 0.90,
+              f"for >=95% of {n} random points", frac_ok >= 0.95,
               f"only {frac_ok*100:.0f}% within tol; mean err={err.mean():.2f} m, max err={err.max():.2f} m")
 
 

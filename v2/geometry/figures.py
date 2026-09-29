@@ -20,7 +20,7 @@ def _poly_patches(geom):
     return []
 
 
-def plan_view(records, zoi_poly, ring_poly, out_png, title="Zona Tec ZOI"):
+def plan_view(records, zoi_poly, ring_poly, out_png, title="Zona Tec ZOI", eval_poly=None):
     fig, ax = plt.subplots(figsize=(9, 9))
     heights = [r["height_m"] for r in records]
     if not heights:
@@ -42,12 +42,14 @@ def plan_view(records, zoi_poly, ring_poly, out_png, title="Zona Tec ZOI"):
             )
             ax.add_patch(patch)
 
-    for poly, style, label in [(zoi_poly, "-", "ZOI (explicit, meshed)"),
-                                (ring_poly, "--", "ring (context, 1-2 blocks)")]:
+    for poly, style, color, label in [
+            (zoi_poly, "-", "red", "ZOI (explicit, meshed)"),
+            (ring_poly, "--", "red", "ring (context, 1-2 blocks)"),
+            (eval_poly, ":", "black", "evaluation zone (G5, >=1-2 blocks upwind)")]:
         if poly is None:
             continue
         xs, ys = poly.exterior.xy
-        ax.plot(xs, ys, style, color="red", linewidth=1.5, label=label)
+        ax.plot(xs, ys, style, color=color, linewidth=1.5, label=label)
 
     minx, miny, maxx, maxy = ring_poly.bounds if ring_poly is not None else zoi_poly.bounds
     pad = 30

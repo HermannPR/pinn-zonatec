@@ -85,11 +85,10 @@ def hit_rate(P, O, D=0.25, W=0.05):
 
 def chang_hanna(P, O):
     P, O = np.asarray(P, float), np.asarray(O, float)
-    m = (O > 0) & (P > 0)
     fac2 = float(np.mean((P / np.where(O > 0, O, np.nan) >= 0.5) & (P / np.where(O > 0, O, np.nan) <= 2.0)))
     nmse = float(np.mean((O - P) ** 2) / (O.mean() * P.mean()))
     fb = float(2 * (O.mean() - P.mean()) / (O.mean() + P.mean()))
-    return {"FAC2": fac2, "NMSE": nmse, "FB": fb, "n_pos": int(m.sum())}
+    return {"FAC2": fac2, "NMSE": nmse, "FB": fb}
 
 
 def crossing(x, u, start_neg=True):
@@ -175,6 +174,11 @@ def process_case(case: Path) -> dict:
         res[f"q_V_{tag}"] = hit_rate(e.Vc, e.Vo, W=W)
         res[f"q_W_{tag}"] = hit_rate(e.Wc, e.Wo, W=W)
         res[f"q_S_all_{tag}"] = hit_rate(e.Sc, e.So, W=W)
+        # VDI hit rate restricted to points where |O| > W (the others hit trivially through W)
+        for comp, (P_, O_) in {"U": (e.Uc, e.Uo), "V": (e.Vc, e.Vo), "W": (e.Wc, e.Wo)}.items():
+            big = np.abs(O_) > W
+            res[f"q_{comp}_bigO_{tag}"] = hit_rate(P_[big], O_[big], W=W) if big.any() else None
+            res[f"n_{comp}_bigO_{tag}"] = int(big.sum())
         for st in ("vert", "h0125", "h125"):
             m = e.set == st
             res[f"q_U_{st}_{tag}"] = hit_rate(e.Uc[m], e.Uo[m], W=W)

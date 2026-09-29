@@ -126,7 +126,8 @@ Informe (métodos, validación, incertidumbre, limitaciones: neutralidad, sin á
 ## 7. Registro de mediciones de cómputo (se llena con datos reales)
 | Fecha | Qué | Resultado |
 |---|---|---|
-| — | benchmark simpleFoam de 1 M de celdas | pendiente (agente del entorno OpenFOAM) |
+| 2026-09-28 | simpleFoam k-ε, caja blockMesh de 1.0 M de celdas, OpenFOAM v2306 MinGW, 20 iteraciones | **mediana: serie 2.77 s/iteración (RAM 1.23 GiB); 6 procesos MS-MPI 1.10 s/iteración (RAM 1.31 GiB), aceleración ~2.5×.** Picos de hasta 2.95 s (paralelo) y 15.7 s (serie) por competencia de CPU con otros procesos. Muestra corta: se reconfirma con el piloto (`logs\openfoam_benchmark1M_*.log`) |
+| 2026-09-28 | Extrapolación a la malla de campaña (~4 M de celdas de snappyHexMesh, H_best con H_max = 85 m) | ~4.5-6 s/iteración (snappyHexMesh es menos eficiente que blockMesh; hay que sumar la competencia de CPU) → 2000 iteraciones en frío ≈ 2.5-3.3 h. **Campaña completa ≈ 80-110 h ≈ 3.5-5 días 24/7** [se confirma con el piloto de 112.5°]. El GCI usa la malla de campaña como fina (una de 8-9 M no cabe en 16 GB): media ~1.9 M y gruesa ~0.9 M |
 
 ## 8. Cómo retomar
 - `STATUS.md` en la raíz tiene el estado vivo: qué corre en segundo plano, con qué PID y en qué log.

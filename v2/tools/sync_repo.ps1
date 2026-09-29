@@ -23,6 +23,12 @@ Copy-Item E:\PINN\datos\alturas\alturas_consolidadas.csv "$repo\v2\docs\fuentes\
 foreach ($f in 'estado.ps1','of_env.ps1','of_run.ps1','sync_repo.ps1','OPENFOAM_SETUP.md') { if (Test-Path "E:\PINN\tools\$f") { Copy-Item "E:\PINN\tools\$f" "$repo\v2\tools\$f" -Force } }
 Copy-Item E:\PINN\tools\cola\*.ps1 "$repo\v2\tools\cola\" -Force; Copy-Item E:\PINN\cola\README.md "$repo\v2\tools\cola\README.md" -Force
 Set-Location $repo
+# ---- secret guard: abort if channel config / tailnet IPs / tokens leaked into v2 ----
+$pats = @('100\.6[0-9]\.\d+\.\d+','100\.9[0-9]\.\d+\.\d+','tail[0-9a-f]{6}','Bearer [A-Za-z0-9_\-\.]{12,}','tk_[A-Za-z0-9]{20,}')
+try { $c = Get-Content 'C:\hivemind\canal.local.json' -Raw | ConvertFrom-Json
+      foreach ($v in @($c.topic, $c.server, $c.respaldo)) { if ($v) { $pats += [regex]::Escape([string]$v) } } } catch {}
+$leak = Get-ChildItem "$repo\v2" -Recurse -File | Select-String -Pattern $pats -List
+if ($leak) { Write-Error ("SECRET GUARD: posibles secretos en: " + (($leak | ForEach-Object { $_.Path }) -join ', ')); exit 3 }
 if ($Commit) {
     git add -A v2
     git -c core.autocrlf=false commit -q -m $Commit
@@ -31,7 +37,9 @@ if ($Commit) {
 if ($Bundle) {
     New-Item -ItemType Directory -Force E:\PINN\outbox | Out-Null
     $b = "E:\PINN\outbox\cambios-$(Get-Date -Format yyyyMMdd-HHmm).bundle"
-    git bundle create $b fase2-zonatec 2>&1 | Out-Null
+    # Incremental: GitHub has 238339e synced as b57565d; claude-hermann rebases with
+    #   git rebase --onto b57565d 238339e <branch>
+    git bundle create $b 238339e..fase2-zonatec 2>&1 | Out-Null
     git bundle verify $b 2>&1 | Select-Object -Last 1
     Write-Output "BUNDLE $b"
 }

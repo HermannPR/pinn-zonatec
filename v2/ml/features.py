@@ -1,12 +1,12 @@
 """Input feature construction (P25=A): Fourier features (Tancik et al. 2020)
-over non-dimensional (x,y,z), plus (sin theta, cos theta), a learned variant
-embedding, SDF and local building height.
+over non-dimensional (x,y,z), plus (sin theta, cos theta), SDF and local
+building height (no variant embedding -- design review M4, see models.py).
 """
 from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -29,9 +29,17 @@ class FourierFeatures(nn.Module):
         return torch.cat([torch.sin(proj), torch.cos(proj)], dim=-1)
 
 
-def scale_sdf(sdf: torch.Tensor, h_ref: float) -> torch.Tensor:
-    """Bounded, smooth SDF feature: tanh(sdf / h_ref)."""
-    return torch.tanh(sdf / h_ref)
+def scale_sdf(sdf: torch.Tensor, wall_scale: float = 10.0) -> torch.Tensor:
+    """Bounded, smooth SDF feature: tanh(sdf / wall_scale).
+
+    M13 (design review): using H_ref as the length scale here (e.g. 85 m for
+    the real campus) compresses the first ~10 m of SDF -- exactly the
+    near-wall region where gradients matter most for wind comfort -- into
+    tanh(10/85)=0.12 of the output range. `wall_scale` is instead a small,
+    fixed length (default 10 m, independent of H_ref) so the near-wall
+    region keeps useful resolution regardless of how large the domain is.
+    """
+    return torch.tanh(sdf / wall_scale)
 
 
 def scale_height(h: torch.Tensor, h_ref: float) -> torch.Tensor:
@@ -184,19 +192,265 @@ class GridGeometry(GeometrySource):
                  height_spacing=np.array([spacing_m, spacing_m], dtype=np.float32))
 
 
-def resolve_geometry_source(variant: str, geometry_dir: Optional[str] = None) -> Optional[GeometrySource]:
-    """Pick a GeometrySource for `variant`: an exact AnalyticBoxGeometry if
-    ml.synthetic recognises the variant (every synthetic smoke-test case),
-    else a GridGeometry loaded from `<geometry_dir>/<variant>_sdf.npz` if
-    that file exists (the real-geometry integration point -- see
-    GridGeometry's docstring), else None (caller falls back to precomputed,
-    non-differentiable sdf/height constants)."""
+def _point_segment_distance(px: torch.Tensor, py: torch.Tensor,
+                             x1: float, y1: float, x2: float, y2: float) -> torch.Tensor:
+    ex, ey = x2 - x1, y2 - y1
+    denom = ex * ex + ey * ey
+    if denom <= 0:
+        dx, dy = px - x1, py - y1
+        return torch.sqrt(dx * dx + dy * dy + 1e-12)
+    t = torch.clamp(((px - x1) * ex + (py - y1) * ey) / denom, 0.0, 1.0)
+    projx, projy = x1 + t * ex, y1 + t * ey
+    dx, dy = px - projx, py - projy
+    return torch.sqrt(dx * dx + dy * dy + 1e-12)
+
+
+def _polygon_horizontal_sdf(x: torch.Tensor, y: torch.Tensor,
+                             vertices: List[Tuple[float, float]]) -> torch.Tensor:
+    """Signed horizontal distance to a simple polygon boundary (negative
+    inside, per the SDF convention), exact for any simple (non-self-
+    intersecting) polygon: unsigned distance = min over edges of the
+    point-to-segment distance (differentiable w.r.t. x,y); sign = standard
+    ray-casting crossing-number inside test (not differentiable, but SDF
+    conventionally uses discrete in/out branches -- see box_sdf/AnalyticBoxGeometry
+    for the same pattern; the VALUE stays continuous across the boundary)."""
+    n = len(vertices)
+    d = None
+    inside = torch.zeros_like(x, dtype=torch.bool)
+    for i in range(n):
+        x1, y1 = vertices[i]
+        x2, y2 = vertices[(i + 1) % n]
+        di = _point_segment_distance(x, y, x1, y1, x2, y2)
+        d = di if d is None else torch.minimum(d, di)
+        with torch.no_grad():
+            cond = (y1 > y) != (y2 > y)
+            dy_edge = (y2 - y1) or 1e-30
+            x_int = x1 + (y - y1) * (x2 - x1) / dy_edge
+            inside = inside ^ (cond & (x < x_int))
+    return torch.where(inside, -d, d)
+
+
+class PolygonPrismGeometry(GeometrySource):
+    """Analytic, smooth SDF/height for a set of arbitrary-footprint LOD1
+    building prisms (design review M3(b)): each building's exact SDF is the
+    polygon-extrusion formula used by `geometry/sdf.py`'s
+    `_fast_extrusion_sdf_level` (same convention, evaluated per-point/
+    analytically instead of on a raster), and multiple buildings are
+    combined with a smooth minimum (log-sum-exp, smoothing length `k_smooth`,
+    default 1 m) instead of a hard `min` -- unlike a piecewise-linear grid
+    (`GridGeometry`), this keeps SECOND derivatives finite, non-zero and
+    well-defined everywhere, which the momentum residual's viscous term
+    (grad(nut * grad(u))) needs; a trilinear/bilinear-interpolated grid has
+    a piecewise-CONSTANT gradient and zero (or singular, at cell faces)
+    second derivatives, so composing the network through it silently drops
+    curvature information from that path everywhere, not just near
+    corners. Use this whenever building footprints (polygons + heights) are
+    available; fall back to `GridGeometry` only if a differentiable
+    analytic source truly isn't an option.
+
+    `buildings`: list of (vertices, height) where vertices is a list of
+    (x, y) tuples (closed polygon, >= 3 points, ZT-ENU metres).
+    """
+
+    def __init__(self, buildings: List[Tuple[List[Tuple[float, float]], float]],
+                 k_smooth: float = 1.0, n_nearest: int = 20, height_smooth_width: float = 2.0):
+        self.buildings = buildings
+        self.k_smooth = k_smooth
+        self.n_nearest = n_nearest
+        self.height_smooth_width = height_smooth_width
+        self._centers = [
+            (sum(v[0] for v in verts) / len(verts), sum(v[1] for v in verts) / len(verts))
+            for verts, _ in buildings
+        ]
+
+    def _nearest_buildings(self, x: torch.Tensor, y: torch.Tensor):
+        if len(self.buildings) <= self.n_nearest:
+            return list(range(len(self.buildings)))
+        # cheap, non-differentiable pre-filter on the BATCH's centroid: fine
+        # since collocation batches are spatially local; for a single global
+        # call spanning the whole domain, all buildings are used instead.
+        with torch.no_grad():
+            cx, cy = float(x.mean()), float(y.mean())
+        d2 = [(cx - bx) ** 2 + (cy - by) ** 2 for bx, by in self._centers]
+        order = sorted(range(len(self.buildings)), key=lambda i: d2[i])
+        return order[: self.n_nearest]
+
+    def _single_prism_sdf(self, x, y, z, vertices, H):
+        hd = _polygon_horizontal_sdf(x, y, vertices)  # signed horizontal (neg inside)
+        d_unsigned = torch.abs(hd)
+        inside = hd < 0
+
+        b_out = torch.clamp(z - H, min=0.0)
+        outside_val = torch.sqrt(d_unsigned ** 2 + b_out ** 2 + 1e-12)
+
+        depth_z = torch.minimum(z, H - z)
+        within = (z >= 0) & (z <= H)
+        inside_within_val = -torch.minimum(d_unsigned, depth_z)
+        inside_above_val = z - H
+
+        inside_val = torch.where(within, inside_within_val, inside_above_val)
+        return torch.where(inside, inside_val, outside_val)
+
+    def sdf_and_height(self, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor):
+        idxs = self._nearest_buildings(x, y)
+        sdfs = [self._single_prism_sdf(x, y, z, self.buildings[i][0], self.buildings[i][1]) for i in idxs]
+        stacked = torch.stack(sdfs, dim=0)  # [B, N]
+        # smooth min: -k * logsumexp(-sdf_i / k)
+        sdf = -self.k_smooth * torch.logsumexp(-stacked / self.k_smooth, dim=0)
+
+        # smooth height: logistic soft-box per building, summed (footprints
+        # don't overlap), same construction as ml.synthetic.torch_local_height_smooth
+        h = torch.zeros_like(x)
+        for i in idxs:
+            verts, H = self.buildings[i]
+            n = len(verts)
+            # smooth footprint indicator via signed horizontal distance
+            hd = _polygon_horizontal_sdf(x, y, verts)
+            indicator = torch.sigmoid(-hd / self.height_smooth_width)
+            h = h + H * indicator
+        return sdf, h
+
+
+def _trilinear_nonuniform_z(vol: torch.Tensor, x0: float, y0: float, res_xy: float,
+                             z_levels: torch.Tensor, x: torch.Tensor, y: torch.Tensor,
+                             z: torch.Tensor) -> torch.Tensor:
+    """Differentiable trilinear interpolation of a [nz,ny,nx] volume with
+    UNIFORM x,y spacing but a possibly NON-uniform per-level `z_levels`
+    array (as produced by geometry/sdf.py's `build_nested_sdf_grid` /
+    `trilinear_sample`) -- `torch.nn.functional.grid_sample` assumes a
+    uniform grid in every dimension, so it can't be used directly for this
+    format; this mirrors `geometry.sdf.trilinear_sample`'s numpy logic with
+    torch ops so gradients flow w.r.t. (x,y,z). Only the integer cell
+    indices are non-differentiable (standard for any grid method -- see
+    GridGeometry / PolygonPrismGeometry docstrings)."""
+    nz, ny, nx = vol.shape
+    fx = (x - x0) / res_xy
+    fy = (y - y0) / res_xy
+    with torch.no_grad():
+        ix0 = torch.clamp(torch.floor(fx).long(), 0, nx - 2)
+        iy0 = torch.clamp(torch.floor(fy).long(), 0, ny - 2)
+        iz0 = torch.clamp(torch.searchsorted(z_levels, z, right=True) - 1, 0, nz - 2)
+    tx = torch.clamp(fx - ix0.to(fx.dtype), 0.0, 1.0)
+    ty = torch.clamp(fy - iy0.to(fy.dtype), 0.0, 1.0)
+    z0v, z1v = z_levels[iz0], z_levels[iz0 + 1]
+    tz = torch.clamp((z - z0v) / torch.clamp(z1v - z0v, min=1e-6), 0.0, 1.0)
+
+    def gather(iz, iy, ix):
+        return vol[iz, iy, ix]
+
+    c000 = gather(iz0, iy0, ix0); c001 = gather(iz0, iy0, ix0 + 1)
+    c010 = gather(iz0, iy0 + 1, ix0); c011 = gather(iz0, iy0 + 1, ix0 + 1)
+    c100 = gather(iz0 + 1, iy0, ix0); c101 = gather(iz0 + 1, iy0, ix0 + 1)
+    c110 = gather(iz0 + 1, iy0 + 1, ix0); c111 = gather(iz0 + 1, iy0 + 1, ix0 + 1)
+    c00 = c000 * (1 - tx) + c001 * tx
+    c01 = c010 * (1 - tx) + c011 * tx
+    c10 = c100 * (1 - tx) + c101 * tx
+    c11 = c110 * (1 - tx) + c111 * tx
+    c0 = c00 * (1 - ty) + c01 * ty
+    c1 = c10 * (1 - ty) + c11 * ty
+    return c0 * (1 - tz) + c1 * tz
+
+
+def _bilinear_uniform(raster: torch.Tensor, x0: float, y0: float, res: float,
+                       x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    ny, nx = raster.shape
+    fx = torch.clamp((x - x0) / res, 0.0, nx - 1.0)
+    fy = torch.clamp((y - y0) / res, 0.0, ny - 1.0)
+    with torch.no_grad():
+        ix0 = torch.clamp(torch.floor(fx).long(), 0, nx - 2)
+        iy0 = torch.clamp(torch.floor(fy).long(), 0, ny - 2)
+    tx = fx - ix0.to(fx.dtype)
+    ty = fy - iy0.to(fy.dtype)
+    c00 = raster[iy0, ix0]; c01 = raster[iy0, ix0 + 1]
+    c10 = raster[iy0 + 1, ix0]; c11 = raster[iy0 + 1, ix0 + 1]
+    c0 = c00 * (1 - tx) + c01 * tx
+    c1 = c10 * (1 - tx) + c11 * tx
+    return c0 * (1 - ty) + c1 * ty
+
+
+class NestedSDFGridGeometry(GeometrySource):
+    """Reads the ACTUAL geometry-pipeline output (design review M3: an
+    earlier version of this module guessed a `<variant>_sdf.npz` filename
+    and flat {sdf,origin,spacing,height} keys that don't match what
+    `geometry/sdf.py: build_nested_sdf_grid` really writes -- fine/coarse
+    nested grids with a non-uniform per-level `fine_z`/`coarse_z` array --
+    so `resolve_geometry_source` silently fell back to non-differentiable
+    constants for every real case, everywhere, not just near walls).
+
+    Reads `geometry/out/<scenario>/sdf_grid_<variant>.npz` (fine grid used
+    up to its z-top, coarse grid above) and a separate smoothed height
+    raster (`height_raster_smooth_s5.npy` + its `_meta.json`, M7: using the
+    *smoothed* raster per DATA_CONTRACT's local_height definition choice).
+    Trilinear/bilinear (custom torch, since z spacing is non-uniform --
+    see `_trilinear_nonuniform_z`), differentiable w.r.t. (x,y,z), with the
+    same piecewise-linear-second-derivative caveat as any grid method
+    (prefer `PolygonPrismGeometry` once building footprint polygons are
+    available -- see its docstring).
+    """
+
+    def __init__(self, sdf_npz_path, height_npy_path, height_meta_path):
+        import json
+        import numpy as np
+        d = np.load(sdf_npz_path)
+        self.fine_sdf = torch.as_tensor(d["fine_sdf"], dtype=torch.float32)
+        self.fine_x0, self.fine_y0 = float(d["fine_x0"]), float(d["fine_y0"])
+        self.fine_res = float(d["fine_res_xy"])
+        self.fine_z = torch.as_tensor(d["fine_z"], dtype=torch.float32)
+        self.coarse_sdf = torch.as_tensor(d["coarse_sdf"], dtype=torch.float32)
+        self.coarse_x0, self.coarse_y0 = float(d["coarse_x0"]), float(d["coarse_y0"])
+        self.coarse_res = float(d["coarse_res"])
+        self.coarse_z = torch.as_tensor(d["coarse_z"], dtype=torch.float32)
+
+        self.height = torch.as_tensor(np.load(height_npy_path), dtype=torch.float32)
+        meta = json.loads(Path(height_meta_path).read_text(encoding="utf-8"))
+        self.h_x0, self.h_y0, self.h_res = meta["x0"], meta["y0"], meta["resolution"]
+
+    def sdf_and_height(self, x: torch.Tensor, y: torch.Tensor, z: torch.Tensor):
+        device = x.device
+        fine_top = float(self.fine_z[-1])
+        z_clamped_fine = torch.clamp(z, max=fine_top)
+        sdf_fine = _trilinear_nonuniform_z(self.fine_sdf.to(device), self.fine_x0, self.fine_y0,
+                                            self.fine_res, self.fine_z.to(device), x, y, z_clamped_fine)
+        sdf_coarse = _trilinear_nonuniform_z(self.coarse_sdf.to(device), self.coarse_x0, self.coarse_y0,
+                                              self.coarse_res, self.coarse_z.to(device), x, y, z)
+        sdf = torch.where(z <= fine_top, sdf_fine, sdf_coarse)
+        h = _bilinear_uniform(self.height.to(device), self.h_x0, self.h_y0, self.h_res, x, y)
+        return sdf, h
+
+
+_GEOMETRY_WARNED = set()
+
+
+def resolve_geometry_source(variant: str, geometry_dir: Optional[str] = None,
+                             scenario: str = "H_best") -> Optional[GeometrySource]:
+    """Pick a GeometrySource for `variant`:
+      1. an exact AnalyticBoxGeometry if ml.synthetic recognises the variant
+         (every synthetic smoke-test case);
+      2. else the real geometry-pipeline output, if present:
+         `<geometry_dir>/<scenario>/sdf_grid_<variant>.npz` +
+         `height_raster_smooth_s5.npy` (NestedSDFGridGeometry, M3/M7);
+      3. else None -- caller falls back to precomputed, non-differentiable
+         sdf/height constants, and PRINTS A WARNING (once per variant) so
+         this never fails silently (M3: an earlier version returned None
+         silently whenever the (wrong) expected filename wasn't found).
+    """
     from . import synthetic
     buildings = synthetic.VARIANTS.get(variant)
     if buildings is not None:
         return AnalyticBoxGeometry(buildings)
+
     geometry_dir = geometry_dir or str(Path(r"E:\PINN\v2\geometry\out"))
-    npz_path = Path(geometry_dir) / f"{variant}_sdf.npz"
-    if npz_path.exists():
-        return GridGeometry(str(npz_path))
+    scenario_dir = Path(geometry_dir) / scenario
+    npz_path = scenario_dir / f"sdf_grid_{variant}.npz"
+    height_path = scenario_dir / "height_raster_smooth_s5.npy"
+    height_meta_path = scenario_dir / "height_raster_smooth_s5_meta.json"
+    if npz_path.exists() and height_path.exists() and height_meta_path.exists():
+        return NestedSDFGridGeometry(str(npz_path), str(height_path), str(height_meta_path))
+
+    if variant not in _GEOMETRY_WARNED:
+        _GEOMETRY_WARNED.add(variant)
+        print(f"[features] WARNING: no differentiable geometry source found for variant "
+              f"'{variant}' (looked for {npz_path}); stage B/C residuals for this variant "
+              f"will use precomputed, non-differentiable sdf/local_height everywhere "
+              f"(not just near walls) -- see EpochSampler.differentiable_geometry docstring.")
     return None

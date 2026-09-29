@@ -11,15 +11,189 @@ Documento para que cualquiera sepa qué está pasando. La parte automática la r
 <!-- AUTO:BEGIN (generado por tools\estado.ps1; no editar a mano) -->
 | Campo | Valor |
 |---|---|
-| Fase | cola |
-| Caso | - |
-| Progreso | 3/3 |
-| Detalle | cola vacía: todos los trabajos terminados |
-| Corriendo | False |
-| Proceso |  |
-| Log | `` |
-| Último latido | 2026-09-28T19:19:44 |
+| Fase | F1 validacion AIJ |
+| Caso | 022_aij_bld_ske_M |
+| Progreso | 2/3 |
+| Detalle | intento 1/3; activo: mpiexec,python,simpleFoam; time step continuity errors : sum local = 2.2572556e-07, global = -6.8615095e-08, cumulative = 0.010365736 |
+| Corriendo | True |
+| Proceso | bash |
+| Log | `E:\PINN\logs\jobs\022_aij_bld_ske_M.log` |
+| Último latido | 2026-09-28T23:52:48 |
 <!-- AUTO:END -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

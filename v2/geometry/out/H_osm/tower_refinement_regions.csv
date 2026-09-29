@@ -1,0 +1,2 @@
+osm_id,name,height_m,centroid_x,centroid_y,footprint_xmin,footprint_ymin,footprint_xmax,footprint_ymax,region_xmin,region_ymin,region_xmax,region_ymax,region_z_top_m,surface_target_size_m,region_target_size_m
+546653067,Fiesta Inn,54.0,-211.0,143.2,-235.6,118.0,-189.6,171.4,-289.6,64.0,-135.6,225.4,81.0,2.0,4.0

@@ -337,9 +337,27 @@ def nut_field(k, z, u_star: float) -> np.ndarray:
     return np.maximum(CMU * k ** 2 / eps_in, 1e-8)
 
 
-def _wall_faces(buildings: List[Building], n_per_face: int = 200, rng=None):
+def _wall_faces(buildings: List[Building], n_per_face: int = 200, rng=None, ground_frac: float = 0.2):
+    """Sample building + ground wall-face points.
+
+    Returns (x,y,z,nx,ny,nz,height) -- `height` (M7, design review) is the
+    TRUE height of the building that face belongs to (0 for ground), so a
+    network reading `local_height` at a wall point sees the same value it
+    would see for a fluid point immediately adjacent to that same wall
+    (previously hard-coded to 0 everywhere, including at building facades
+    and roofs -- an inconsistent feature). `height` also lets metrics.py
+    scale corner/wake/canyon zones by the *nearest building's* height H_b
+    instead of a single global H_ref (M8).
+
+    `ground_frac` (M7, design review) caps the ground-plane share of wall
+    points at roughly `ground_frac` (default 20%) of the total, rather than
+    a fixed count independent of how many building points exist -- ground
+    faces trivially satisfy u.n=0 (w=0 there), so letting them dominate the
+    impermeability loss wastes most of the wall-BC batch on the easiest
+    points.
+    """
     rng = rng or np.random.default_rng(0)
-    xs, ys, zs, nxs, nys, nzs = [], [], [], [], [], []
+    xs, ys, zs, nxs, nys, nzs, hs = [], [], [], [], [], [], []
     for b in buildings:
         n = n_per_face
         # 4 vertical faces
@@ -355,30 +373,50 @@ def _wall_faces(buildings: List[Building], n_per_face: int = 200, rng=None):
                 nx_, ny_ = 0.0, float(sign)
             xs.append(xx); ys.append(yy); zs.append(zz)
             nxs.append(np.full(n, nx_)); nys.append(np.full(n, ny_)); nzs.append(np.zeros(n))
+            hs.append(np.full(n, b.H))
         # roof
         xx = rng.uniform(b.xc - b.hx, b.xc + b.hx, n)
         yy = rng.uniform(b.yc - b.hy, b.yc + b.hy, n)
         zz = np.full(n, b.H)
         xs.append(xx); ys.append(yy); zs.append(zz)
         nxs.append(np.zeros(n)); nys.append(np.zeros(n)); nzs.append(np.ones(n))
-    # ground plane (excluding building footprints)
-    n_ground = n_per_face * 2
-    gx = rng.uniform(-LX / 2, LX / 2, n_ground)
-    gy = rng.uniform(-LY / 2, LY / 2, n_ground)
-    inside_any = np.zeros(n_ground, dtype=bool)
+        hs.append(np.full(n, b.H))
+
+    n_building = sum(a.size for a in xs)
+    n_ground_target = max(1, int(round(n_building * ground_frac / (1.0 - ground_frac))))
+    # oversample then trim to exactly n_ground_target after excluding footprints
+    gx = rng.uniform(-LX / 2, LX / 2, n_ground_target * 3)
+    gy = rng.uniform(-LY / 2, LY / 2, n_ground_target * 3)
+    inside_any = np.zeros(gx.shape[0], dtype=bool)
     for b in buildings:
         inside_any |= (np.abs(gx - b.xc) <= b.hx) & (np.abs(gy - b.yc) <= b.hy)
-    gx, gy = gx[~inside_any], gy[~inside_any]
+    gx, gy = gx[~inside_any][:n_ground_target], gy[~inside_any][:n_ground_target]
     gz = np.zeros_like(gx)
     xs.append(gx); ys.append(gy); zs.append(gz)
     nxs.append(np.zeros_like(gx)); nys.append(np.zeros_like(gx)); nzs.append(np.ones_like(gx))
+    hs.append(np.zeros_like(gx))
     return (np.concatenate(xs).astype(np.float32), np.concatenate(ys).astype(np.float32),
             np.concatenate(zs).astype(np.float32), np.concatenate(nxs).astype(np.float32),
-            np.concatenate(nys).astype(np.float32), np.concatenate(nzs).astype(np.float32))
+            np.concatenate(nys).astype(np.float32), np.concatenate(nzs).astype(np.float32),
+            np.concatenate(hs).astype(np.float32))
 
 
 def case_id(variant: str, theta_deg: float, u10: float, mesh_id: str = MESH_ID) -> str:
     return f"zt_{variant}_th{int(round(theta_deg * 10)):04d}_U{int(round(u10 * 10)):03d}_{mesh_id}"
+
+
+def _z_levels() -> np.ndarray:
+    """Vertical levels for the synthetic grid: a uniform grid (the previous
+    approach, spacing ~2.9 m for NZ=22 over ZTOP=60 m) has NO points at all
+    in the 1.5-2.0 m pedestrian-comfort band (design review M10 -- the
+    headline metric height), silently making any pedestrian-layer metric
+    empty on this smoke data. A few explicit near-ground levels (matching
+    typical near-wall CFD mesh refinement practice) fix that while keeping
+    the rest of the domain at roughly the original coarse spacing."""
+    near_ground = np.array([0.0, 0.5, 1.0, 1.5, 1.75, 2.0, 2.5, 3.5, 5.0, 7.5, 10.0])
+    n_upper = max(NZ - len(near_ground), 4)
+    upper = np.linspace(near_ground[-1], ZTOP, n_upper)[1:]  # avoid duplicating 10.0
+    return np.concatenate([near_ground, upper]).astype(np.float64)
 
 
 def generate_case(variant: str, theta_deg: float, u10: float, split: str, out_dir: Path) -> Tuple[str, dict]:
@@ -387,7 +425,7 @@ def generate_case(variant: str, theta_deg: float, u10: float, split: str, out_di
 
     xs = np.linspace(-LX / 2, LX / 2, NX)
     ys = np.linspace(-LY / 2, LY / 2, NY)
-    zs = np.linspace(0.0, ZTOP, NZ)
+    zs = _z_levels()
     X, Y, Z = np.meshgrid(xs, ys, zs, indexing="ij")
     x, y, z = X.ravel(), Y.ravel(), Z.ravel()
 
@@ -403,10 +441,21 @@ def generate_case(variant: str, theta_deg: float, u10: float, split: str, out_di
 
     wall_dist = np.minimum(sdf, z)
     dx = LX / (NX - 1)
+    dy = LY / (NY - 1)
     first_layer = 0.75 * dx
     is_wall_adjacent = (wall_dist < first_layer).astype(np.uint8)
     lheight = local_height(x, y, buildings)
-    vol = np.full_like(x, (LX / NX) * (LY / NY) * (ZTOP / NZ))
+    # cell volume: dx*dy uniform, dz from the (non-uniform, M10) z levels --
+    # a per-point lookup of that level's thickness (half the sum of its two
+    # neighbouring gaps; a single adjacent gap at the top/bottom boundary).
+    zs_sorted = np.sort(zs)
+    dz_levels = np.empty_like(zs_sorted)
+    dz_levels[0] = zs_sorted[1] - zs_sorted[0]
+    dz_levels[-1] = zs_sorted[-1] - zs_sorted[-2]
+    dz_levels[1:-1] = (zs_sorted[2:] - zs_sorted[:-2]) / 2.0
+    z_to_dz = dict(zip(zs_sorted.tolist(), dz_levels.tolist()))
+    dz_per_point = np.array([z_to_dz[zi] for zi in z], dtype=np.float32)
+    vol = (dx * dy * dz_per_point).astype(np.float32)
 
     cid = case_id(variant, theta_deg, u10)
     out_path = out_dir / f"{cid}.h5"
@@ -422,10 +471,11 @@ def generate_case(variant: str, theta_deg: float, u10: float, split: str, out_di
             f.create_dataset(name, data=arr.astype(np.float32))
         f.create_dataset("is_wall_adjacent", data=is_wall_adjacent)
 
-        wfx, wfy, wfz, wnx, wny, wnz = _wall_faces(buildings, rng=np.random.default_rng(42))
+        wfx, wfy, wfz, wnx, wny, wnz, wfh = _wall_faces(buildings, rng=np.random.default_rng(42))
         wf = f.create_group("wall_faces")
         wf.create_dataset("x", data=wfx); wf.create_dataset("y", data=wfy); wf.create_dataset("z", data=wfz)
         wf.create_dataset("nx", data=wnx); wf.create_dataset("ny", data=wny); wf.create_dataset("nz", data=wnz)
+        wf.create_dataset("height", data=wfh)  # M7: true building height at this face (0 for ground)
 
         zi = np.linspace(0.0, ZTOP, 64).astype(np.float32)
         ui = log_law(zi, u_star).astype(np.float32)
@@ -481,7 +531,22 @@ def generate_all(out_dir: str = "data/synthetic") -> Path:
         for r in rows:
             writer.writerow(r)
     print(f"wrote manifest {manifest_path}")
+    seal_manifest(manifest_path)
     return manifest_path
+
+
+def seal_manifest(manifest_path: Path) -> str:
+    """Write a SHA-256 sidecar (M9, design review): the authoritative
+    train/val/test split must come from the manifest, verified against this
+    hash at load time (ml/data.py), not from each HDF5 file's own `split`
+    attribute (which could silently drift from the manifest, e.g. if a case
+    file is regenerated or hand-edited without updating manifest.csv)."""
+    import hashlib
+    digest = hashlib.sha256(Path(manifest_path).read_bytes()).hexdigest()
+    sha_path = Path(str(manifest_path) + ".sha256")
+    sha_path.write_text(digest + "\n", encoding="utf-8")
+    print(f"wrote {sha_path} ({digest[:12]}...)")
+    return digest
 
 
 if __name__ == "__main__":

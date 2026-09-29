@@ -1,0 +1,6 @@
+osm_id,name,height_m,centroid_x,centroid_y,footprint_xmin,footprint_ymin,footprint_xmax,footprint_ymax,region_xmin,region_ymin,region_xmax,region_ymax,region_z_top_m,surface_target_size_m,region_target_size_m
+546653067,Fiesta Inn,87.8,-211.0,143.2,-235.6,118.0,-189.6,171.4,-323.3,30.3,-101.8,259.1,131.6,2.0,4.0
+1539504906,,78.2,-185.4,14.9,-197.6,-5.0,-173.2,36.5,-275.8,-83.3,-95.0,114.8,117.4,2.0,4.0
+1539531158,,33.2,-184.3,139.2,-223.5,105.0,-144.8,174.7,-256.7,71.7,-111.5,207.9,49.8,2.0,4.0
+1543350343,Centro de Tecnología Avanzada para la Producción (CETEC),43.0,-29.4,-329.8,-54.5,-337.8,-4.3,-321.9,-97.5,-380.8,38.7,-278.9,64.5,2.0,4.0
+1543350348,BiblioTEC,35.5,75.6,-352.5,38.6,-376.3,113.4,-328.5,3.1,-411.9,148.9,-292.9,53.3,2.0,4.0

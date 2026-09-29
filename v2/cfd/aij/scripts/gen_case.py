@@ -213,8 +213,8 @@ def turb_var(model: str) -> str:
     return "omega" if model == "kOmegaSST" else "epsilon"
 
 
-def write_inlet_tables(case: Path):
-    t = pd.read_csv(PROC / "inlet_profile.csv")
+def write_inlet_tables(case: Path, table: Path | None = None):
+    t = pd.read_csv(table or (PROC / "inlet_profile.csv"))
     c = case / "constant" / "inflow"
     c.mkdir(parents=True, exist_ok=True)
     (c / "U").write_text("(\n" + "\n".join(f"    ({z:.6g} ({u:.6g} 0 0))" for z, u in zip(t.z, t.U)) + "\n)\n", newline="\n")
@@ -255,10 +255,14 @@ def write_fields(case: Path, kind: str, model: str, inlet: str, ground: str, fit
     has_bld = kind == "building"
 
     def top(q):
-        if inlet == "loglaw":   # Richards & Hoxey: impose the inflow values at the top (keeps the shear stress)
-            t = {"U": "atmBoundaryLayerInletVelocity", "k": "atmBoundaryLayerInletK",
-                 "epsilon": "atmBoundaryLayerInletEpsilon", "omega": "atmBoundaryLayerInletOmega"}[q]
-            return f"type {t};\n        {abl_common(rh)}\n        value $internalField;"
+        if inlet == "loglaw":
+            # Richards & Hoxey (1993) / Hargreaves & Wright (2007), as in the v2306 tutorial
+            # verificationAndValidation/atmosphericModels/atmDownstreamDevelopment: constant shear stress
+            # tau = u*^2 (kinematic) on U, zeroGradient for k and eps/omega.
+            if q == "U":
+                return (f"type fixedShearStress;\n        tau ({rh['u_star']**2:.6g} 0 0);\n"
+                        "        value $internalField;")
+            return "type zeroGradient;"
         return "type slip;"      # tabulated tunnel profile: top is in the free stream above the BL (zero shear)
 
     def inl(q):
@@ -693,6 +697,9 @@ def main():
     ap.add_argument("--kind", choices=["building", "empty2d"], default="building")
     ap.add_argument("--model", choices=["realizableKE", "kOmegaSST", "kEpsilon"], default="realizableKE")
     ap.add_argument("--inlet", choices=["table", "loglaw"], default="table")
+    ap.add_argument("--inlet-table", default=None, help="csv (z,U,k,epsilon,omega); default data/processed/inlet_profile.csv")
+    ap.add_argument("--sigma-eps", type=float, default=None,
+                    help="kEpsilon sigmaEps (1.167 = kappa^2/((C2-C1)sqrt(Cmu)) for kappa=0.41, RH-consistent)")
     ap.add_argument("--ground", choices=["rough", "smooth"], default="rough")
     ap.add_argument("--gwf", choices=["atm", "std"], default="atm", help="eps/omega ground wall function")
     ap.add_argument("--level", type=float, default=1.0, help="refinement factor f (1 = medium)")
@@ -724,8 +731,11 @@ def main():
     foam(case / "constant" / "transportProperties", "dictionary", "transportProperties",
          "transportModel  Newtonian;\nnu              1.5e-05;\n")
     foam(case / "constant" / "turbulenceProperties", "dictionary", "turbulenceProperties",
-         f"simulationType RAS;\nRAS\n{{\n    RASModel        {a.model};\n    turbulence      on;\n    printCoeffs     on;\n}}\n")
-    write_inlet_tables(case)
+         f"simulationType RAS;\nRAS\n{{\n    RASModel        {a.model};\n    turbulence      on;\n    printCoeffs     on;\n"
+         + (f"    kEpsilonCoeffs\n    {{\n        Cmu 0.09;\n        C1 1.44;\n        C2 1.92;\n        C3 0;\n"
+            f"        sigmak 1.0;\n        sigmaEps {a.sigma_eps};\n    }}\n"
+            if (a.sigma_eps and a.model == "kEpsilon") else "") + "}\n")
+    write_inlet_tables(case, Path(a.inlet_table) if a.inlet_table else None)
     z0g = write_fields(case, a.kind, a.model, a.inlet, a.ground, fits, a.gwf)
     # atmospheric BCs live in libatmosphericModels
     cd = (case / "system" / "controlDict").read_text()
@@ -735,7 +745,7 @@ def main():
     (case / "Allclean").write_text(ALLCLEAN, newline="\n")
     meta = {"case": case.name, "kind": a.kind, "model": a.model, "inlet": a.inlet, "ground": a.ground,
             "ground_z0": z0g if a.ground == "rough" else None, "gwf": a.gwf, "level": a.level, "algo": a.algo,
-            "np": np_, "stage1": a.stage1, "end": a.end, "mesh": info, "U_H": fits["U_H"], "b": B, "H": H}
+            "np": np_, "inlet_table": a.inlet_table, "sigma_eps": a.sigma_eps, "stage1": a.stage1, "end": a.end, "mesh": info, "U_H": fits["U_H"], "b": B, "H": H}
     (case / "case.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
 

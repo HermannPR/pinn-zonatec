@@ -18,3 +18,5 @@ Margin compromise: the outlet (15H) requirement is applied on EVERY side (not ju
 - TOTAL: 2,073,069 cells
 
 **What gives**: hitting 2-2.5M means coarsening background/ring beyond the requested 16 m/4 m (28 m/6 m as shown), OR shrinking the 2 m-refined ZOI footprint/height below 850x850x20 m, OR accepting ~4-4.5M cells (background 16 m, ring 4 m only up to 40 m height) which still fits the ORIGINAL 3-5M PC budget from the task brief. Recommendation: keep ZOI near-field resolution (pedestrian-level answer quality depends on it most) and accept ~4-4.5M, OR relax to the 28 m/6 m plan if 2-2.5M is a hard ceiling.
+
+## Tower refinement (G6): 1 towers > 30 m get an explicit refinementRegion (<=4 m, footprint+1H margin, up to 1.5H) -- see tower_refinement_regions.csv. Extra volume-mesh cells for these regions (replacing coarser background/ring cells there): ~31,451. Plus a refinementSurface on each tower's own STL faces targeting <=2 m (>=10 cells across a ~28-35 m tower side, Tominaga et al. 2008) -- a boundary-layer-scale addition, not a volumetric one, not counted here (see C4 in the F1 review for near-wall layer cells).

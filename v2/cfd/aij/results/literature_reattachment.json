@@ -1,0 +1,30 @@
+{
+ "standard k-eps (KE1-KE8)": {
+  "XR": "no reverse flow",
+  "XF": "1.66-2.70"
+ },
+ "RNG k-eps (RNG1, RNG2)": {
+  "XR": "0.50-0.58",
+  "XF": "2.80-3.34"
+ },
+ "LK k-eps (LK1-LK3)": {
+  "XR": "0.53-0.87",
+  "XF": "2.98-3.19"
+ },
+ "Durbin k-eps (DBN)": {
+  "XR": "0.63",
+  "XF": "2.70"
+ },
+ "DSM": {
+  "XR": ">1.0",
+  "XF": "4.22"
+ },
+ "LES with inflow turbulence (LES2)": {
+  "XR": "0.50",
+  "XF": "2.10"
+ },
+ "Experiment (Ishihara & Hibi 1998)": {
+  "XR": "0.52",
+  "XF": "1.42"
+ }
+}

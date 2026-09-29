@@ -154,8 +154,20 @@ STOREY_HEIGHT_M = 3.4  # uniform floor-to-floor height (Hermann's guidance: 3.2-
 GOOGLE_QC_MIN_HEIGHT_M = 2.0     # below this, almost certainly ground noise
 GOOGLE_QC_MAX_HEIGHT_M = 250.0
 GOOGLE_QC_BAD_CONFIDENCE = {"low"}
-DISCREPANCY_RATIO_LOW = 0.7
+DISCREPANCY_RATIO_LOW = 0.7    # reporting-only flag (needs_field_check style signal)
 DISCREPANCY_RATIO_HIGH = 1.4
+
+# F1 review G3 (blocker): a small footprint covers too few *effective*
+# Google 2.5D pixels (~4 m effective resolution -> 16 m^2/pixel, per
+# fuentes_alturas.md) for a median to reliably reject contamination from a
+# taller neighbour. Acceptance gate (on top of the existing confidence/range
+# QC): reject Google for footprints with < MIN_EFFECTIVE_PIXELS effective
+# pixels UNLESS there is no real OSM level count to fall back on, or the
+# satellite/levels ratio is inside a wider sanity band.
+MIN_EFFECTIVE_PIXEL_AREA_M2 = 16.0
+MIN_EFFECTIVE_PIXELS = 12
+ACCEPT_RATIO_LOW = 0.6
+ACCEPT_RATIO_HIGH = 1.8
 
 
 def _storey_height(building_type=None):
@@ -244,9 +256,14 @@ def load_manual_overrides(path):
     return out
 
 
-def assign_height_best(tags, osm_id, evidence, manual_overrides=None):
+def assign_height_best(tags, osm_id, evidence, manual_overrides=None, footprint_area_m2=None):
     """H_best scenario. Returns (height_m, levels, height_source,
-    needs_field_check, google_vs_levels_discrepancy_flag)."""
+    needs_field_check, google_vs_levels_discrepancy_flag).
+
+    `footprint_area_m2` enables the F1 review's G3 small-footprint QC gate
+    (see MIN_EFFECTIVE_PIXELS); if omitted, that gate is skipped (treated as
+    always having enough pixels) -- callers that care about G3 (i.e.
+    build_geometry.py) must pass it."""
     key = str(osm_id)
     btype = tags.get("building", "yes")
     sh = _storey_height(btype)
@@ -280,14 +297,34 @@ def assign_height_best(tags, osm_id, evidence, manual_overrides=None):
     g_conf = e.get("google_confidence")
     google_qc_pass = (g is not None and g_conf not in GOOGLE_QC_BAD_CONFIDENCE
                        and GOOGLE_QC_MIN_HEIGHT_M <= g <= GOOGLE_QC_MAX_HEIGHT_M)
+
+    # F1 review G3 acceptance gate: accept Google only if the footprint has
+    # >= MIN_EFFECTIVE_PIXELS effective pixels (a HARD minimum -- too little
+    # data to trust a median against contamination from a taller neighbour,
+    # regardless of levels) AND, when there IS a real OSM level count to
+    # compare against, it is at least broadly consistent with it (0.6-1.8);
+    # with enough pixels but no levels to check, Google is accepted as-is.
+    small_footprint_risk = False
+    if google_qc_pass and footprint_area_m2 is not None:
+        n_eff = footprint_area_m2 / MIN_EFFECTIVE_PIXEL_AREA_M2
+        if n_eff < MIN_EFFECTIVE_PIXELS:
+            small_footprint_risk = True
+            google_qc_pass = False
+        elif levels_is_real and levels_based_h > 0:
+            ratio = g / levels_based_h
+            if not (ACCEPT_RATIO_LOW <= ratio <= ACCEPT_RATIO_HIGH):
+                small_footprint_risk = True
+                google_qc_pass = False
+
     if google_qc_pass:
         return g, round(g / sh, 2), "google_25d", discrepancy_flag, discrepancy_flag
 
     if e.get("osm_height_m") is not None:
         return e["osm_height_m"], round(e["osm_height_m"] / sh, 2), "osm_height", False, discrepancy_flag
 
+    src_suffix = "_small_footprint_qc_fallback" if small_footprint_risk else ""
     if levels_is_real:
-        return levels_based_h, e["osm_levels"], "osm_levels_x3.4", False, discrepancy_flag
+        return levels_based_h, e["osm_levels"], f"osm_levels_x3.4{src_suffix}", small_footprint_risk, discrepancy_flag
 
     return levels_based_h, DEFAULT_LEVELS_BY_TYPE.get(btype, DEFAULT_LEVELS_FALLBACK), \
-        "estimated_type_x3.4", True, discrepancy_flag
+        f"estimated_type_x3.4{src_suffix}", True, discrepancy_flag

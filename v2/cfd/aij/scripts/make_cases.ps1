@@ -6,7 +6,7 @@
 #>
 param([ValidateSet('hom', 'bld', 'gci', 'all')][string]$Set = 'all',
       [string]$GciModel = 'realizableKE', [ValidateSet('atm', 'std')][string]$Gwf = 'atm',
-      [string]$Root = 'E:\PINN\runs\aij')
+      [string]$Root = 'E:\PINN\runs\aij', [int]$Np = 6)
 $py = 'E:\PINN\.venv\Scripts\python.exe'
 $gen = Join-Path $PSScriptRoot 'gen_case.py'
 $short = @{ realizableKE = 'rke'; kOmegaSST = 'sst'; kEpsilon = 'ske' }
@@ -14,7 +14,7 @@ New-Item -ItemType Directory -Force $Root | Out-Null
 function Gen($name, [string[]]$extra) {
     $out = Join-Path $Root $name
     if ((Test-Path $out) -and (Get-ChildItem $out | Measure-Object).Count -gt 0) { "skip $name (exists)"; return }
-    & $py $gen --out $out --gwf $Gwf @extra | Out-Null
+    & $py $gen --out $out --gwf $Gwf --np $Np @extra | Out-Null
     if ($LASTEXITCODE -eq 0) { "made $name" } else { "ERROR $name" }
 }
 if ($Set -in 'hom', 'all') {

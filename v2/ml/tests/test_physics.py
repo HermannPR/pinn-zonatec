@@ -159,6 +159,85 @@ def test_differentiable_sdf_feature_matches_finite_difference_and_detaching_brea
     assert torch.median(err_detached).item() > 0.1
 
 
+def test_polygon_prism_geometry_matches_analytic_box_sdf():
+    """M3(b) design review: PolygonPrismGeometry (arbitrary-footprint,
+    log-sum-exp smooth-min over buildings) must reduce to the exact box SDF
+    for a rectangular footprint, AND -- unlike GridGeometry -- must have
+    smooth, finite, generally NON-zero second derivatives (the whole point
+    of using an analytic smooth-min instead of a piecewise-linear grid)."""
+    from ml import features, synthetic
+
+    b0 = synthetic.Building(xc=-30.0, yc=-20.0, hx=15.0, hy=10.0, H=25.0)
+    b1 = synthetic.Building(xc=25.0, yc=15.0, hx=12.5, hy=12.5, H=18.0)
+    buildings = [b0, b1]
+
+    def as_polygon(b):
+        verts = [(b.xc - b.hx, b.yc - b.hy), (b.xc + b.hx, b.yc - b.hy),
+                  (b.xc + b.hx, b.yc + b.hy), (b.xc - b.hx, b.yc + b.hy)]
+        return (verts, b.H)
+
+    poly_geo = features.PolygonPrismGeometry([as_polygon(b0), as_polygon(b1)], k_smooth=0.25)
+    analytic = features.AnalyticBoxGeometry(buildings)
+
+    torch.manual_seed(3)
+    n = 1000
+    x = torch.rand(n) * 160 - 80
+    y = torch.rand(n) * 160 - 80
+    z = torch.rand(n) * 55 + 0.5
+
+    with torch.no_grad():
+        sdf_a, h_a = analytic.sdf_and_height(x, y, z)
+        sdf_p, h_p = poly_geo.sdf_and_height(x, y, z)
+
+    err = torch.abs(sdf_a - sdf_p)
+    # away from the smooth-min's own blending region (where two buildings'
+    # sdf values are close), the small k_smooth makes this near-exact.
+    assert torch.median(err).item() < 0.05
+    assert torch.quantile(err, 0.95).item() < 1.0
+
+    # smooth, non-zero, finite second derivatives (unlike a piecewise-linear
+    # grid, which has zero-or-singular second derivatives almost everywhere)
+    xyz = torch.stack([x, y, z], dim=1).requires_grad_(True)
+    sdf, _ = poly_geo.sdf_and_height(xyz[:, 0], xyz[:, 1], xyz[:, 2])
+    g = torch.autograd.grad(sdf.sum(), xyz, create_graph=True)[0]
+    g2 = torch.autograd.grad(g[:, 0].sum(), xyz, create_graph=True)[0]
+    assert torch.isfinite(g2).all()
+    assert torch.max(torch.abs(g2)).item() > 1e-6  # not trivially/identically zero
+
+
+def test_nested_sdf_grid_geometry_reads_real_geometry_output_if_present():
+    """If the real geometry pipeline's output exists (M3), the loader must
+    actually find and use it instead of silently falling back -- this is
+    exactly the bug the design review caught (wrong assumed filename/keys).
+    Skips if the geometry pipeline hasn't been run in this environment.
+    """
+    import os
+    from ml import features
+
+    # "var2" (not "base"/"var1" -- both of those names collide with
+    # ml.synthetic's OWN smoke-test variants, which must keep taking
+    # priority for synthetic cases; var2/var3 are real-geometry-only names)
+    variant = "var2"
+    scenario_dir = r"E:\PINN\v2\geometry\out\H_best"
+    npz_path = os.path.join(scenario_dir, f"sdf_grid_{variant}.npz")
+    h_path = os.path.join(scenario_dir, "height_raster_smooth_s5.npy")
+    h_meta = os.path.join(scenario_dir, "height_raster_smooth_s5_meta.json")
+    if not (os.path.exists(npz_path) and os.path.exists(h_path) and os.path.exists(h_meta)):
+        import pytest
+        pytest.skip("real geometry output not present in this environment")
+
+    source = features.resolve_geometry_source(variant)
+    assert isinstance(source, features.NestedSDFGridGeometry)
+
+    x = torch.tensor([0.0, 50.0, -50.0])
+    y = torch.tensor([0.0, 50.0, -50.0])
+    z = torch.tensor([1.75, 1.75, 1.75])  # pedestrian layer
+    sdf, h = source.sdf_and_height(x, y, z)
+    assert torch.isfinite(sdf).all()
+    assert torch.isfinite(h).all()
+    assert (h >= 0).all()
+
+
 def test_grid_geometry_matches_analytic_sdf_within_grid_resolution(tmp_path):
     """GridGeometry (the real-geometry integration point: a precomputed SDF
     volume + height raster queried with grid_sample) must agree with the

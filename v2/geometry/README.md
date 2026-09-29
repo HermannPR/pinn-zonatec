@@ -1,5 +1,84 @@
 # Zona Tec v2 -- geometría (Campus Monterrey + Distrito Tec)
 
+## Cambios por la revisión independiente F1 (2026-09-28, ver `v2/docs/revisiones/F1_revision.md`)
+
+Todos los bloqueantes e importantes de geometría (G1-G7) y el hueco de
+integración con ML (M3) quedaron atendidos en esta corrida:
+
+- **G1 (bloqueante) -- morfometría con huellas OSM incompletas en N/NE/W/NW**:
+  se recalculó lambda_p/lambda_f/H_mean/sigma_H para los 16 sectores usando
+  huellas de **Overture** (`overture_parse.py`, 26,507 huellas vs 2,942 de
+  OSM en el mismo bbox) + altura mediana de Google, más un control
+  independiente (fracción de píxeles del ráster con altura >2.5 m en cada
+  cuña, sin ninguna huella vectorizada). Resultado en
+  `out/H_best/roughness_16sectors_overture.csv`: en el sector N (0°),
+  lambda_p pasa de **0.048 (OSM, muy incompleto)** a **0.41 (Overture)**,
+  con el control de ráster en **0.52** confirmando que Overture es mucho más
+  cercano a la realidad. z0_Macdonald en ese sector pasa de 0.044 a 0.177 m.
+  Con Overture, lambda_p entre sectores es mucho más uniforme (0.36-0.56)
+  que con OSM (0.05-0.55), justo lo que predecía la revisión.
+- **G3 (bloqueante) -- alturas sospechosas en huellas chicas**: nueva regla
+  de aceptación en `heights.py:assign_height_best` (área/16 m² ≥ 12 píxeles
+  efectivos **y**, si hay `building:levels`, razón satelital/niveles entre
+  0.6 y 1.8; si no se cumple, se usa niveles×3.4 m y se marca). Mediana
+  calculada sobre la huella **erosionada 2 m** (`google_raster.py`). Lista
+  dedicada de los casos donde esto sí cambió la respuesta (>10 m de
+  diferencia): `out/H_best/g3_small_footprint_qc_flags.csv` (15 edificios,
+  incluye los 9 originales del reviewer: 1543350346/47, 1539504902/05,
+  1539506600-04).
+- **G4 (importante) -- SDF rápido con errores grandes cerca de torres**: se
+  reemplazó el método rápido (vecino más cercano en planta) por un **SDF
+  analítico exacto** para prismas LOD1 (`sdf.ExactPrismSDF`,
+  `sdf.build_nested_sdf_grid`): distancia 2D exacta con shapely +
+  combinación CSG-union correcta entre edificios. Es la **misma
+  implementación** para los grids `.npz`, y queda lista para el extractor
+  HDF5 y el export web (una sola fuente de verdad, sin desajuste
+  entrenamiento/inferencia). Test de regresión específico en `sdf.py`
+  reproduce el caso sintético del revisor (torre de 80 m a 16 m gana sobre
+  una casa de 3 m a 2 m) y verifica el resultado correcto (~13 m, antes
+  ~27 m). De paso se encontró y corrigió un bug real en la validación: el
+  STL de un solo sólido (`zonatec_base.stl`) puede fusionar vértices en
+  paredes medianeras y confundir el test de adentro/afuera de trimesh;
+  `BuildingSDF` ahora combina cada edificio del archivo **multisolid** por
+  separado. Con la corrección, el error de validación del grid cayó de
+  hasta 13.6 m a **≤0.74 m** (interpolación trilineal pura, sin bug).
+- **G5 (importante) -- anillo explícito de solo ~120 m**: se adoptó la
+  opción barata (sin remallar): una **zona de evaluación** recortada 100 m
+  hacia adentro del borde de la ZOI (`eval_half_size_m=325` en
+  `frame.json`, dibujada en `fig_plan_view.png`). Así cada punto de
+  evaluación tiene ≥220 m de edificios explícitos a barlovento en el peor
+  caso (creciendo a ≥320 m cerca del propio borde de la zona de
+  evaluación).
+- **G6 (importante) -- torres subresueltas por el plan de refinamiento**:
+  `out/<escenario>/tower_refinement_regions.csv` -- una fila por edificio
+  >30 m con su `refinementRegion` (huella + margen de 1×H, hasta 1.5×H,
+  ≤4 m) y el `refinementSurface` sugerido (≤2 m en las caras, ≥10 celdas
+  por lado de torre). Costo adicional estimado incluido en
+  `domain_circular_recommendation.md`.
+- **G7 (menor)**: `R_IN` de la cuña de barlovento corregido de 560 a 780 m
+  (las esquinas del anillo están a 545·√2=770.7 m); kappa=0.40 (Macdonald)
+  vs 0.41 (contrato/OpenFOAM) documentado; d_control=0 confirmado como
+  simplificación explícita.
+- **M3 -- formato de geometría para ML**: `ml_adapter.py` convierte el grid
+  SDF anidado de este proyecto al formato plano de un solo grid uniforme
+  que espera `ml/features.py:GridGeometry` (`out/<variante>_sdf.npz`,
+  claves `sdf,origin,spacing,height,height_origin,height_spacing`). Se optó
+  por un adaptador documentado (no cambiar el esquema de ninguno de los dos
+  lados) porque este proyecto necesita un grid anidado (fino cerca del
+  suelo + grueso hasta 2·H_max) y ML necesita un solo grid uniforme; el
+  adaptador exporta el sub-grid **grueso** (4 m, cobertura completa 0 a
+  2·H_max). Solo se exporta el escenario default (H_best). Test de
+  round-trip en `ml_adapter.py` (`round_trip_test()`), verificado además
+  contra la clase real `ml.features.GridGeometry` (carga y muestrea
+  correctamente). Ver también `v2/ml/features.py` (sin cambios de ese
+  lado).
+
+Archivos nuevos: `geometry/overture_parse.py`, `geometry/ml_adapter.py`;
+`geometry/google_raster.py` ampliado (mediana erosionada, p75, control de
+lambda_p por ráster); `geometry/sdf.py` reescrito (SDF exacto);
+`geometry/heights.py` con la regla de aceptación G3.
+
+
 Pipeline reproducible: `build_geometry.py [H_best|H_osm|all]` regenera todo a
 partir del JSON de Overpass cacheado y de los datos de alturas de otro
 pipeline del equipo. `test_geometry.py` verifica ambos escenarios.

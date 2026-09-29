@@ -146,6 +146,7 @@ class WindRoseResult:
     calm_fraction: float
     variable_fraction: float
     n_hours_total: int
+    sector_speeds: list = None    # length-16 list of (speeds, weights) non-calm arrays per sector (for empirical exceedance, I3)
 
 
 def build_windrose(hourly: pd.DataFrame) -> WindRoseResult:
@@ -180,6 +181,7 @@ def build_windrose(hourly: pd.DataFrame) -> WindRoseResult:
     W = sector_weights(d)  # (n_dir, 16)
 
     rows = []
+    sector_speeds = []
     for j, c_center in enumerate(SECTOR_CENTERS):
         w_j = W[:, j]
         n_eff = w_j.sum()
@@ -192,10 +194,32 @@ def build_windrose(hourly: pd.DataFrame) -> WindRoseResult:
         rows.append(dict(sector_centre_deg=c_center, frequency=freq,
                           mean_u10=mean_u, weibull_c=c_fit, weibull_k=k_fit,
                           n_eff=n_eff))
+        keep = w_j > 1e-9
+        sector_speeds.append((u[keep].copy(), w_j[keep].copy()))
     table = pd.DataFrame(rows)
     return WindRoseResult(table=table, calm_fraction=calm_fraction,
                            variable_fraction=variable_fraction,
-                           n_hours_total=n_total)
+                           n_hours_total=n_total, sector_speeds=sector_speeds)
+
+
+def empirical_prob_exceed_sector(windrose: WindRoseResult, sector_idx: int, u_threshold: float) -> tuple[float, float]:
+    """Direct (non-parametric) P(U10 > u_threshold | sector) from the raw
+    weighted sample, plus the effective number of "hours" exceeding the
+    threshold in that sector (n_eff_exceed = sum of fractional weights of
+    exceeding observations -- directly comparable across the 16 sectors and
+    to `WindRoseResult.n_hours_total`, see review F1 I3: aggregating
+    n_eff_exceed over all 16 sectors for u=15 m/s reproduces the reviewer's
+    "7 h in 15 years" figure exactly).
+
+    Returns (p_exceed_given_sector, n_eff_exceed).
+    """
+    speeds, weights = windrose.sector_speeds[sector_idx]
+    n_eff = weights.sum()
+    if n_eff <= 0:
+        return np.nan, 0.0
+    exceed_mask = speeds > u_threshold
+    n_eff_exceed = float(weights[exceed_mask].sum())
+    return n_eff_exceed / n_eff, n_eff_exceed
 
 
 # --------------------------------------------------------------------------
@@ -263,13 +287,31 @@ def prob_exceed_conditional(u: float, c: float, k: float) -> float:
     return float(np.exp(-(u / c) ** k))
 
 
-def annual_exceedance(windrose: pd.DataFrame, K, threshold_local: float) -> dict:
+MIN_RELIABLE_EFFECTIVE_HOURS = 30.0  # review F1 I3: below this, don't trust either estimator
+
+
+def annual_exceedance(windrose, K, threshold_local: float, sector_speeds=None,
+                       method: str = "auto", min_count: float = MIN_RELIABLE_EFFECTIVE_HOURS) -> dict:
     """Annual probability that the LOCAL pedestrian-level wind speed exceeds
     a comfort/danger threshold, combining the measured climatology with a
     CFD-derived amplification factor K(theta) = U_local(theta) / U10(theta).
 
     This is the function the comfort module (Lawson LDDC / NEN 8100 criteria,
-    P10=C) calls once K(theta) has been computed from the CFD cases.
+    P10=C) calls once K(theta) has been computed from the CFD cases (K may
+    also be a GEM-based effective amplification factor, see
+    `gust_equivalent_mean`, for the Lawson criteria).
+
+    Review F1 (I3): the single Weibull fit per sector reproduces the body of
+    the distribution well but UNDERESTIMATES the extreme tail (e.g. at
+    K=1, Weibull gives P(U10>15)=0.0013%, vs. 0.0055% -- 7 h in 15 years --
+    from the raw hourly record). Per the review's fix, this function now
+    uses the **direct weighted-empirical** estimate by default whenever there
+    is enough data to trust it (>= `min_count` effective hours exceeding the
+    sector-equivalent threshold), and only falls back to the Weibull fit
+    (interpolation/smoothing role) when the empirical sample is too thin --
+    in which case the sector row is flagged `note='n_eff_exceed < {min_count}
+    h -> inconclusive, Weibull extrapolation shown'` instead of silently
+    reporting a number as if it were reliable.
 
     Parameters
     ----------
@@ -285,13 +327,24 @@ def annual_exceedance(windrose: pd.DataFrame, K, threshold_local: float) -> dict
         against, e.g. 5 m/s (NEN 8100 class boundaries), 15 m/s (danger
         criterion), or any Lawson LDDC threshold (4/6/8/... m/s exceeded
         with some frequency).
+    sector_speeds : optional, `WindRoseResult.sector_speeds` (list of 16
+        (speeds, weights) arrays). Required for the empirical path; if None,
+        `method` is forced to 'weibull' (backward-compatible pure-Weibull
+        behaviour).
+    method : 'auto' (default; empirical when reliable, else Weibull,
+        flagged), 'weibull' (always use the fitted Weibull), or 'empirical'
+        (always use the direct weighted-empirical estimate, whatever its
+        sample size -- use with caution beyond ~12 m/s equivalent U10).
+    min_count : effective-hours threshold below which the empirical estimate
+        is considered unreliable (review default: 30 h over the 15-year
+        record).
 
     Returns
     -------
     dict with:
       'per_sector' : DataFrame (sector_centre_deg, K, u10_equivalent,
-                     p_exceed_given_sector, contribution) where
-                     contribution = frequency * p_exceed_given_sector.
+                     p_exceed_given_sector, contribution, source, n_eff_exceed,
+                     note) where contribution = frequency * p_exceed_given_sector.
       'annual_probability' : sum of 'contribution' over sectors (fraction of
                      all hours/year, calm included implicitly as 0 exceedance).
       'hours_per_year' : annual_probability * 8760.
@@ -301,12 +354,52 @@ def annual_exceedance(windrose: pd.DataFrame, K, threshold_local: float) -> dict
     K_arr = np.full(n, float(K)) if np.isscalar(K) else np.asarray(K, dtype=float)
     if len(K_arr) != n:
         raise ValueError(f"K must be scalar or have length {n} (got {len(K_arr)})")
+    if method not in ("auto", "weibull", "empirical"):
+        raise ValueError("method must be 'auto', 'weibull' or 'empirical'")
+    if sector_speeds is None and method != "weibull":
+        method = "weibull"  # no data to do otherwise; backward compatible
 
     u10_equiv = threshold_local / K_arr  # U10 needed for U_local to hit threshold
-    p_cond = np.array([
-        prob_exceed_conditional(u10_equiv[i], wr["weibull_c"].iloc[i], wr["weibull_k"].iloc[i])
-        for i in range(n)
-    ])
+    p_cond = np.empty(n)
+    source = [""] * n
+    n_eff_exceed = np.full(n, np.nan)
+    notes = [""] * n
+
+    for i in range(n):
+        p_weib = prob_exceed_conditional(u10_equiv[i], wr["weibull_c"].iloc[i], wr["weibull_k"].iloc[i])
+        p_emp, n_exc = (np.nan, np.nan)
+        if sector_speeds is not None:
+            speeds, weights = sector_speeds[i]
+            n_eff_i = weights.sum()
+            if n_eff_i > 0:
+                exceed_mask = speeds > u10_equiv[i]
+                n_exc = float(weights[exceed_mask].sum())
+                p_emp = n_exc / n_eff_i
+            n_eff_exceed[i] = n_exc
+
+        if method == "weibull":
+            use_empirical = False
+        elif method == "empirical":
+            use_empirical = np.isfinite(p_emp)
+        else:  # 'auto': trust any DIRECTLY OBSERVED exceedance (n_exc>0) over
+            # the Weibull fit, which is known to bias the tail (review I3);
+            # only fall back to Weibull when this sector has NO observed
+            # exceedance at all at this threshold (true extrapolation).
+            use_empirical = np.isfinite(n_exc) and n_exc > 0
+
+        if use_empirical and np.isfinite(p_emp):
+            p_cond[i] = p_emp
+            source[i] = "empirical"
+            if np.isfinite(n_exc) and n_exc < min_count:
+                notes[i] = (f"n_eff_exceed={n_exc:.2f} h < {min_count:.0f} h: estimacion empirica con "
+                            f"incertidumbre muestral grande a esta rareza, interpretar como orden de magnitud")
+        else:
+            p_cond[i] = p_weib
+            source[i] = "weibull"
+            if sector_speeds is not None:
+                notes[i] = ("sin excedencias observadas en este sector para este umbral -> "
+                            "extrapolacion Weibull (orden de magnitud unicamente)")
+
     contribution = wr["frequency"].to_numpy() * p_cond
     per_sector = pd.DataFrame({
         "sector_centre_deg": wr["sector_centre_deg"],
@@ -314,6 +407,9 @@ def annual_exceedance(windrose: pd.DataFrame, K, threshold_local: float) -> dict
         "u10_equivalent": u10_equiv,
         "p_exceed_given_sector": p_cond,
         "contribution": contribution,
+        "source": source,
+        "n_eff_exceed_hours": n_eff_exceed,
+        "note": notes,
     })
     annual_p = float(contribution.sum())
     return dict(per_sector=per_sector, annual_probability=annual_p,
@@ -326,3 +422,142 @@ def empirical_exceedance(hourly: pd.DataFrame, threshold: float) -> float:
     in test_windclimate.py -- not used by the comfort module itself.
     """
     return float((hourly["wspd_ms"] > threshold).mean())
+
+
+# --------------------------------------------------------------------------
+# Gust-equivalent mean (Lawson LDDC input), review F1 I4
+# --------------------------------------------------------------------------
+
+def gust_equivalent_mean(u_local: float, k_local: float, gust_factor: float = 3.25,
+                          gust_peak_to_mean: float = 1.85):
+    """GEM = max(U_local, U_gust / gust_peak_to_mean), an ESTIMATE of the
+    Lawson LDDC "gust equivalent mean" speed from a steady-RANS point (mean
+    speed + turbulent kinetic energy only -- no resolved gust spectrum).
+
+        sigma_u   = sqrt(2 k_local / 3)           (isotropic turbulence assumption)
+        U_gust    = u_local + gust_factor * sigma_u   (gust_factor g ~ 3.0-3.5, review F1 I4)
+        GEM       = max(u_local, U_gust / gust_peak_to_mean)   (1.85: Lawson's peak/gust-to-mean ratio)
+
+    **[ESTIMACION -- no verificado contra la definicion original de gust
+    equivalent mean de Lawson]**: con RANS de estado estacionario solo se
+    tiene la media y k, no el espectro de rafagas real; esta es la via
+    estandar para aproximarlo (revision F1, I4) pero debe declararse como
+    estimacion en cualquier reporte de Lawson LDDC. Para comparar contra
+    NEN 8100 (que usa la media, no GEM) usando el mismo K de la media
+    (`U_local`, sin ajuste de rafaga) evita sesgar la comparacion a favor de
+    Lawson (revision F1, I4, ultima frase).
+
+    Returns the GEM speed [m/s] (same array shape as u_local/k_local); pass
+    an array of GEM(theta)/U10(theta) as `K` to `annual_exceedance` to get
+    the Lawson-criterion annual exceedance probability at a point.
+    """
+    sigma_u = np.sqrt(2.0 / 3.0 * np.asarray(k_local, dtype=float))
+    u_gust = np.asarray(u_local, dtype=float) + gust_factor * sigma_u
+    return np.maximum(u_local, u_gust / gust_peak_to_mean)
+
+
+# --------------------------------------------------------------------------
+# NEN 8100 comfort/danger classes and Lawson LDDC thresholds, review F1 I4
+#
+# **[no verificado contra el texto impreso de NEN 8100:2006]**: los cortes
+# de clase y las cualidades por actividad reproducidos abajo vienen del
+# resumen de la revision independiente F1 (`docs/revisiones/F1_revision.md`,
+# seccion I4), no de una lectura directa de la norma. Usar con esa reserva
+# hasta cotejarlos contra el documento NEN oficial.
+# --------------------------------------------------------------------------
+
+NEN8100_COMFORT_THRESHOLD_MS = 5.0   # local mean speed @ 1.75 m, NEN 8100
+NEN8100_DANGER_THRESHOLD_MS = 15.0
+
+# (class, p_lower_inclusive, p_upper_exclusive), P(V_loc > 5 m/s), as fractions
+NEN8100_COMFORT_CLASSES = [
+    ("A", 0.000, 0.025),
+    ("B", 0.025, 0.05),
+    ("C", 0.05, 0.10),
+    ("D", 0.10, 0.20),
+    ("E", 0.20, 1.001),
+]
+
+# quality of a class for a given pedestrian activity ("buena"/"moderada"/"mala")
+NEN8100_ACTIVITY_QUALITY = {
+    "atravesar": {"A": "buena", "B": "buena", "C": "buena", "D": "moderada", "E": "mala"},
+    "pasear": {"A": "buena", "B": "buena", "C": "moderada", "D": "mala", "E": "mala"},
+    "estar_sentado": {"A": "buena", "B": "moderada", "C": "mala", "D": "mala", "E": "mala"},
+}
+
+# (label, p_lower_inclusive, p_upper_exclusive), P(V_loc > 15 m/s)
+NEN8100_DANGER_CLASSES = [
+    ("sin_riesgo", 0.0000, 0.0005),
+    ("riesgo_limitado", 0.0005, 0.003),
+    ("peligroso", 0.003, 1.001),
+]
+
+# Lawson LDDC comfort thresholds [m/s], each evaluated against GEM and a
+# <5% annual exceedance criterion (increasingly permissive land use).
+# **[no verificado contra Lawson 1978 / la version exacta citada por un
+# consultor]** -- ver docstring de gust_equivalent_mean.
+LAWSON_LDDC_COMFORT_THRESHOLDS_MS = {
+    "estar_sentado_largo": 4.0,
+    "estar_de_pie_pasear": 6.0,
+    "caminar_negocios": 8.0,
+    "incomodo": 10.0,
+}
+LAWSON_LDDC_COMFORT_EXCEEDANCE_LIMIT = 0.05  # "exceeded < 5% of the time"
+
+# Lawson safety/danger thresholds [m/s] (mean or GEM), annual % very low.
+# **[no verificado]**.
+LAWSON_LDDC_DANGER_THRESHOLDS_MS = {
+    "riesgo_limitado": 15.0,
+    "peligroso": 20.0,
+}
+
+
+def nen8100_comfort_class(p_gt_5: float) -> str:
+    """NEN 8100 class A-E from P(V_loc > 5 m/s) (annual, local pedestrian height).
+    **[no verificado contra el texto impreso]**, see module note above."""
+    for label, lo, hi in NEN8100_COMFORT_CLASSES:
+        if lo <= p_gt_5 < hi:
+            return label
+    raise ValueError(f"p_gt_5={p_gt_5} out of [0,1] range")
+
+
+def nen8100_activity_quality(activity: str, p_gt_5: float) -> str:
+    """'buena'/'moderada'/'mala' quality of the site for `activity` in
+    {'atravesar','pasear','estar_sentado'}. **[no verificado]**."""
+    if activity not in NEN8100_ACTIVITY_QUALITY:
+        raise ValueError(f"activity must be one of {sorted(NEN8100_ACTIVITY_QUALITY)}")
+    cls = nen8100_comfort_class(p_gt_5)
+    return NEN8100_ACTIVITY_QUALITY[activity][cls]
+
+
+def nen8100_danger_class(p_gt_15: float) -> str:
+    """'sin_riesgo'/'riesgo_limitado'/'peligroso' from P(V_loc > 15 m/s).
+    **[no verificado contra el texto impreso]**."""
+    for label, lo, hi in NEN8100_DANGER_CLASSES:
+        if lo <= p_gt_15 < hi:
+            return label
+    raise ValueError(f"p_gt_15={p_gt_15} out of [0,1] range")
+
+
+def lawson_lddc_assessment(windrose, K_gem, sector_speeds=None, method: str = "auto") -> dict:
+    """Evaluate every Lawson LDDC comfort threshold (4/6/8/10 m/s, GEM,
+    <5% of the time) and the two danger thresholds (15/20 m/s) for one point,
+    given its GEM-based effective amplification K_gem(theta) = GEM(theta)/U10(theta)
+    (see `gust_equivalent_mean`). **[no verificado]**, see module note.
+
+    Returns a dict: {label: {'threshold': ms, 'p_exceed': float, 'passes':
+    bool (comfort) or ...}} for each comfort threshold (passes = p_exceed <
+    5%), plus a 'danger' sub-dict {label: {'threshold','p_exceed'}} for the
+    15/20 m/s thresholds (no pass/fail cutoff attached here -- report the
+    number and compare to the review's qualitative bands).
+    """
+    out = {"comfort": {}, "danger": {}}
+    for label, threshold in LAWSON_LDDC_COMFORT_THRESHOLDS_MS.items():
+        res = annual_exceedance(windrose, K_gem, threshold, sector_speeds=sector_speeds, method=method)
+        p = res["annual_probability"]
+        out["comfort"][label] = dict(threshold_ms=threshold, p_exceed=p,
+                                      passes=p < LAWSON_LDDC_COMFORT_EXCEEDANCE_LIMIT)
+    for label, threshold in LAWSON_LDDC_DANGER_THRESHOLDS_MS.items():
+        res = annual_exceedance(windrose, K_gem, threshold, sector_speeds=sector_speeds, method=method)
+        out["danger"][label] = dict(threshold_ms=threshold, p_exceed=res["annual_probability"])
+    return out

@@ -164,3 +164,96 @@ def test_weibull_fit_weighted_recovers_known_parameters():
     c_fit, k_fit = wc.weibull_fit_weighted(x, w)
     assert c_fit == pytest.approx(c_true, rel=0.03)
     assert k_fit == pytest.approx(k_true, rel=0.05)
+
+
+# --------------------------------------------------------------------------
+# I3 (review F1): empirical-first exceedance for the extreme tail
+# --------------------------------------------------------------------------
+
+def test_annual_exceedance_auto_reproduces_review_P_gt_15(windrose):
+    """The review recomputed P(U10>15, K=1) directly from the hourly cache
+    and got 0.0055% (7 h in 15 years), NOT the 0.010% previously in
+    README.md (a rounding-display bug) nor the Weibull's 0.0013% (tail
+    underestimate). method='auto' must reproduce 0.0055% exactly (it IS the
+    same direct count, just re-derived through the per-sector API)."""
+    result = wc.annual_exceedance(windrose.table, K=1.0, threshold_local=15.0,
+                                   sector_speeds=windrose.sector_speeds, method="auto")
+    assert result["annual_probability"] * 100 == pytest.approx(0.0055, abs=2e-4)
+    # exact identity: annual_probability was built from n_eff_exceed / n_hours_total,
+    # so multiplying back by the actual observed hour count recovers the raw count (7 h).
+    assert result["annual_probability"] * windrose.n_hours_total == pytest.approx(7.0, abs=0.1)
+    # sectors with zero observed exceedances must fall back to Weibull and say so
+    per_sector = result["per_sector"]
+    weibull_rows = per_sector[per_sector["source"] == "weibull"]
+    assert (weibull_rows["n_eff_exceed_hours"] == 0).all()
+    assert weibull_rows["note"].str.contains("extrapolacion Weibull").all()
+
+
+def test_annual_exceedance_auto_reproduces_review_P_gt_10(windrose):
+    result = wc.annual_exceedance(windrose.table, K=1.0, threshold_local=10.0,
+                                   sector_speeds=windrose.sector_speeds, method="auto")
+    assert result["annual_probability"] * 100 == pytest.approx(0.52, abs=0.01)
+
+
+def test_empirical_prob_exceed_sector_matches_annual_exceedance_path(windrose):
+    for j in range(wc.N_SECTORS):
+        p_direct, n_direct = wc.empirical_prob_exceed_sector(windrose, j, 5.0)
+        result = wc.annual_exceedance(windrose.table, K=1.0, threshold_local=5.0,
+                                       sector_speeds=windrose.sector_speeds, method="empirical")
+        row = result["per_sector"].iloc[j]
+        if np.isfinite(p_direct):
+            assert row["p_exceed_given_sector"] == pytest.approx(p_direct)
+
+
+# --------------------------------------------------------------------------
+# I4 (review F1): NEN 8100 classes and Lawson LDDC
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("p,expected", [
+    (0.01, "A"), (0.025, "B"), (0.04, "B"), (0.05, "C"), (0.08, "C"),
+    (0.10, "D"), (0.15, "D"), (0.20, "E"), (0.50, "E"),
+])
+def test_nen8100_comfort_class_boundaries(p, expected):
+    assert wc.nen8100_comfort_class(p) == expected
+
+
+def test_nen8100_activity_quality_examples():
+    assert wc.nen8100_activity_quality("atravesar", 0.15) == "moderada"   # class D
+    assert wc.nen8100_activity_quality("pasear", 0.15) == "mala"          # class D
+    assert wc.nen8100_activity_quality("estar_sentado", 0.03) == "moderada"  # class B
+
+
+@pytest.mark.parametrize("p,expected", [
+    (0.0001, "sin_riesgo"), (0.001, "riesgo_limitado"), (0.01, "peligroso"),
+])
+def test_nen8100_danger_class_boundaries(p, expected):
+    assert wc.nen8100_danger_class(p) == expected
+
+
+def test_nen8100_class_rejects_out_of_range():
+    with pytest.raises(ValueError):
+        wc.nen8100_comfort_class(1.5)
+
+
+def test_gust_equivalent_mean_is_at_least_the_mean_speed():
+    u = np.array([2.0, 5.0, 8.0])
+    k = np.array([0.5, 2.0, 5.0])
+    gem = wc.gust_equivalent_mean(u, k)
+    assert np.all(gem >= u)
+
+
+def test_gust_equivalent_mean_zero_turbulence_equals_mean():
+    gem = wc.gust_equivalent_mean(5.0, 0.0)
+    assert gem == pytest.approx(5.0)
+
+
+def test_lawson_lddc_assessment_runs_and_orders_thresholds_sensibly(windrose):
+    K_gem = 1.2  # illustrative fixed amplification, no CFD available in this test
+    result = wc.lawson_lddc_assessment(windrose.table, K_gem, sector_speeds=windrose.sector_speeds)
+    comfort = result["comfort"]
+    # a higher threshold must never be exceeded MORE often than a lower one
+    ps = [comfort["estar_sentado_largo"]["p_exceed"], comfort["estar_de_pie_pasear"]["p_exceed"],
+          comfort["caminar_negocios"]["p_exceed"], comfort["incomodo"]["p_exceed"]]
+    assert all(ps[i] >= ps[i + 1] for i in range(len(ps) - 1))
+    danger = result["danger"]
+    assert danger["riesgo_limitado"]["p_exceed"] >= danger["peligroso"]["p_exceed"]

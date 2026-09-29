@@ -7,9 +7,10 @@
   "origin_lat": 25.65355556778036,
   "zoi_half_size_m": 425.0,
   "ring_half_size_m": 545.0,
-  "H_ref": 85.21875,
+  "eval_half_size_m": 325.0,
+  "H_ref": 87.75,
   "H_ref_source": "google_25d",
   "H_ref_osm_id": 546653067,
-  "H_max": 85.21875,
+  "H_max": 87.75,
   "frame": "ZT-ENU (x=East,y=North,z=Up; ground z=0)"
 }

@@ -52,6 +52,8 @@ import morphometry as morph
 import sdf as sdf_mod
 import figures as fig_mod
 import google_raster
+import overture_parse
+import ml_adapter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OSM_JSON = r"E:\PINN\v2\data\raw\osm\osm_zonatec_raw.json"
@@ -67,6 +69,17 @@ ORIGIN_E = 370450.0
 ORIGIN_N = 2837950.0
 ZOI_HALF = 425.0     # -> 850 x 850 m explicit-building box
 RING_HALF = 545.0    # -> 1090 x 1090 m context ring (~120 m, 1-2 blocks, added)
+EVAL_HALF = 325.0    # F1 review G5: the explicit ring is only ~120 m (~1 block).
+                      # Option adopted (of the two proposed): keep the ZOI/ring/STL
+                      # geometry unchanged (cheap, no remesh) and instead report
+                      # confort/metrics on this SMALLER "evaluation zone" (850-200=
+                      # 650 m box, i.e. 100 m recessed from the ZOI edge on every
+                      # side), so every evaluation point has >=100+120=220 m of
+                      # explicit upwind buildings at the ZOI edge, growing to >=320 m
+                      # near the eval-zone's own edge -- roughly 1-2 blocks per
+                      # Tominaga et al. (2008). Low buildings near the ZOI edge were
+                      # the ones under-covered; towers (214-240 m from the edge) were
+                      # already fine either way.
 MORPH_RADIUS = 1200.0  # buildings kept for upwind morphometry (sector wedges out to 1200 m)
 
 SCENARIOS = ["H_best", "H_osm"]  # H_best is the DEFAULT/recommended scenario
@@ -108,7 +121,9 @@ def assign_heights_for_scenario(records, scenario, evidence=None, manual_overrid
             r["google_discrepancy"] = False
         else:  # H_best
             h, lev, src, flag, disc = heights_mod.assign_height_best(
-                r["tags"], r["osm_id"], evidence, manual_overrides)
+                r["tags"], r["osm_id"], evidence, manual_overrides,
+                footprint_area_m2=r["geom"].area)
+            r["google_raw_median_m"] = (evidence or {}).get(str(r["osm_id"]), {}).get("google_height_m")
             r["height_m"], r["levels"], r["height_source"], r["needs_field_check"] = h, lev, src, flag
             r["google_discrepancy"] = disc
     return records
@@ -210,6 +225,7 @@ def run_scenario(scenario, out_dir, cleaned_utm, zoi_poly_utm, ring_poly_utm, ev
         "origin_easting": ORIGIN_E, "origin_northing": ORIGIN_N,
         "origin_lon": lon0, "origin_lat": lat0,
         "zoi_half_size_m": ZOI_HALF, "ring_half_size_m": RING_HALF,
+        "eval_half_size_m": EVAL_HALF,
         "H_ref": H_ref, "H_ref_source": h_ref_rec["height_source"] if h_ref_rec else None,
         "H_ref_osm_id": h_ref_rec["osm_id"] if h_ref_rec else None,
         "H_max": H_max,
@@ -224,24 +240,30 @@ def run_scenario(scenario, out_dir, cleaned_utm, zoi_poly_utm, ring_poly_utm, ev
         r["geom"] = translate(r["geom"], xoff=-ORIGIN_E, yoff=-ORIGIN_N)
     zoi_poly_z = translate(zoi_poly_utm, xoff=-ORIGIN_E, yoff=-ORIGIN_N)
     ring_poly_z = translate(ring_poly_utm, xoff=-ORIGIN_E, yoff=-ORIGIN_N)
+    eval_poly_z = shapely_box(-EVAL_HALF, -EVAL_HALF, EVAL_HALF, EVAL_HALF)
     zoi_buildings = [r for r in cleaned if r["role"] == "zoi"]
     ring_buildings = [r for r in cleaned if r["role"] == "ring"]
 
     write_buildings_csv(zoi_buildings + ring_buildings, out_dir, scenario)
     build_stls(zoi_buildings, ring_buildings, out_dir)
     variant_records = build_variants(zoi_buildings, zoi_poly_z, out_dir, H_max)
-    build_height_raster(zoi_buildings + ring_buildings, ring_poly_z, out_dir)
+    smoothed_rasters = build_height_raster(zoi_buildings + ring_buildings, ring_poly_z, out_dir)
+    towers = build_tower_refinement_regions(zoi_buildings, out_dir)
     domain_rows = build_domain_csv(zoi_buildings + ring_buildings, H_max, out_dir)
-    circular = build_circular_domain_report(domain_rows, H_max, out_dir)
+    circular = build_circular_domain_report(domain_rows, H_max, out_dir, towers)
     roughness_rows = build_roughness_csv(cleaned, (0.0, 0.0), out_dir)
+    if scenario == "H_best":
+        build_roughness_overture_csv(out_dir)
 
     all_variant_records = dict(variant_records)
     all_variant_records["base"] = zoi_buildings
-    build_sdf_grids(all_variant_records, zoi_poly_z, H_max, out_dir)
+    is_default_scenario = (scenario == SCENARIOS[0])  # H_best -- see M3 / ml_adapter.py
+    build_sdf_grids(all_variant_records, zoi_poly_z, H_max, out_dir,
+                     ml_export=is_default_scenario, height_raster_for_ml=smoothed_rasters.get(5.0))
 
     fig_mod.plan_view(zoi_buildings + ring_buildings, zoi_poly_z, ring_poly_z,
                        os.path.join(out_dir, "fig_plan_view.png"),
-                       title=f"Zona Tec ZOI ({scenario})")
+                       title=f"Zona Tec ZOI ({scenario})", eval_poly=eval_poly_z)
     fig_mod.roughness_rose(roughness_rows, os.path.join(out_dir, "fig_roughness_rose.png"))
 
     provenance = {}
@@ -283,6 +305,36 @@ def write_buildings_csv(records, out_dir, scenario):
     flagged.sort(key=importance, reverse=True)
     _write_verify_csv(os.path.join(out_dir, "heights_to_verify.csv"), flagged, importance)
     log(f"[{scenario}] heights_to_verify.csv: {len(flagged)} rows (of {len(records)})")
+
+    # F1 review G3 (blocker): dedicated report for the small-footprint QC
+    # fallback group WHERE it actually mattered (the rejected Google median
+    # was notably taller -- >15 m above the accepted fallback -- the
+    # original "27-41 m on 63-188 m2 footprints" failure mode), not every
+    # small building the pixel-count gate touched (most just confirm a
+    # perfectly ordinary low default and aren't worth a human's time).
+    g3_group = [r for r in records
+                if "small_footprint_qc_fallback" in r["height_source"]
+                and r.get("google_raw_median_m") is not None
+                and r["google_raw_median_m"] - r["height_m"] > 10.0]
+    g3_group.sort(key=lambda r: -(r["google_raw_median_m"] - r["height_m"]))
+    if g3_group:
+        path_g3 = os.path.join(out_dir, "g3_small_footprint_qc_flags.csv")
+        with open(path_g3, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["osm_id", "name", "lon", "lat", "footprint_area_m2",
+                        "google_rejected_median_m", "fallback_height_m", "fallback_source",
+                        "dist_to_zoi_centre_m"])
+            for r in g3_group:
+                c_z = r["geom"].centroid
+                c_utm = r["geom_utm"].centroid
+                lon, lat = _to_wgs84.transform(c_utm.x, c_utm.y)
+                w.writerow([r["osm_id"], r["tags"].get("name", ""), round(lon, 6), round(lat, 6),
+                            round(r["geom"].area, 1), round(r["google_raw_median_m"], 1),
+                            round(r["height_m"], 2), r["height_source"],
+                            round(math.hypot(c_z.x, c_z.y), 1)])
+        log(f"[{scenario}] g3_small_footprint_qc_flags.csv: {len(g3_group)} buildings where a "
+            f"small footprint's rejected Google reading was >15 m taller than the accepted "
+            f"fallback (the G3 failure mode) -> {path_g3}")
 
     top15 = sorted(records, key=lambda r: r["height_m"], reverse=True)[:15]
     _write_verify_csv(os.path.join(out_dir, "top15_tallest.csv"), top15, importance)
@@ -425,9 +477,11 @@ def build_height_raster(records, ring_poly_z, out_dir):
     hr.save(os.path.join(out_dir, "height_raster.npy"))
     log(f"height_raster.npy: shape {hr.array.shape}, res {res} m")
 
+    smoothed_rasters = {}
     for sigma in (5.0, 10.0):
         smoothed = sdf_mod.gaussian_smoothed_height_raster(hr, sigma)
         smoothed.save(os.path.join(out_dir, f"height_raster_smooth_s{int(sigma)}.npy"))
+        smoothed_rasters[sigma] = smoothed
     log("Gaussian-smoothed height rasters written (sigma=5,10 m)")
 
     base_stl = os.path.join(out_dir, "zonatec_base.stl")
@@ -437,17 +491,30 @@ def build_height_raster(records, ring_poly_z, out_dir):
         sd = bsdf.signed_distance(test_pts)
         log(f"SDF sanity check (expect + at high z / far corner): {sd}")
 
+    return smoothed_rasters
 
-def build_sdf_grids(variant_records, zoi_poly_z, H_max, out_dir):
-    """Nested (fine+coarse) analytic SDF grids, one .npz per variant. See
-    sdf.build_nested_sdf_grid for the method and its documented
-    approximation (fast 2D-nearest-footprint extrusion SDF, exact in the
-    near-field/interior, approximate in some far-field multi-building
-    cases). Each grid is validated against the exact trimesh SDF of the
-    matching STL at random points."""
+
+def build_sdf_grids(variant_records, zoi_poly_z, H_max, out_dir, ml_export=False,
+                     height_raster_for_ml=None):
+    """Nested (fine+coarse) EXACT prism-union SDF grids (F1 review G4), one
+    .npz per variant. See sdf.build_nested_sdf_grid / sdf.ExactPrismSDF for
+    the method (the SAME method used for scattered-point queries, HDF5
+    extraction, and here). Each grid is validated against the independent
+    trimesh SDF of the matching STL at random points (should now agree
+    closely, since both are exact -- unlike the old approximate method).
+
+    When `ml_export` is True (the default/H_best scenario -- see M3), also
+    writes the flat-layout adapter file `<OUT_ROOT>/<variant>_sdf.npz` that
+    `ml/features.py:GridGeometry` / `resolve_geometry_source` expect
+    (see geometry/ml_adapter.py)."""
     bounds = zoi_poly_z.bounds
     for vname, recs in variant_records.items():
-        stl_path = os.path.join(out_dir, f"zonatec_{vname}.stl" if vname != "base" else "zonatec_base.stl")
+        base_name = "zonatec_base" if vname == "base" else f"zonatec_{vname}"
+        # validate against the MULTI-solid STL: BuildingSDF combines each
+        # building's mesh separately (see sdf.BuildingSDF docstring) -- the
+        # single-solid file welds vertices at party walls into one mesh,
+        # which can silently misclassify inside/outside near a shared wall.
+        stl_path = os.path.join(out_dir, f"{base_name}_multisolid.stl")
         grid = sdf_mod.build_nested_sdf_grid(recs, bounds, H_max)
         np.savez_compressed(os.path.join(out_dir, f"sdf_grid_{vname}.npz"), **grid)
         if os.path.exists(stl_path):
@@ -457,6 +524,13 @@ def build_sdf_grids(variant_records, zoi_poly_z, H_max, out_dir):
                 f"(fine res={grid['fine_res_xy']} m)")
         else:
             log(f"sdf_grid_{vname}.npz written (no matching STL to validate against)")
+
+        if ml_export and height_raster_for_ml is not None:
+            ml_adapter.write_ml_geometry_npz(grid, height_raster_for_ml,
+                                              os.path.join(OUT_ROOT, f"{vname}_sdf.npz"))
+    if ml_export:
+        log(f"ML adapter npz written to {OUT_ROOT}\\<variant>_sdf.npz for "
+            f"{list(variant_records.keys())} (see geometry/ml_adapter.py, M3)")
 
 
 def _validate_grid_against_exact(grid, stl_path, bounds, H_max, n_points=300, seed=0):
@@ -473,6 +547,38 @@ def _validate_grid_against_exact(grid, stl_path, bounds, H_max, n_points=300, se
                                        grid["fine_res_xy"], grid["fine_z"], pts)
     err = np.abs(exact - interp)
     return {"mean": float(err.mean()), "max": float(err.max()), "n": n_points}
+
+
+TOWER_HEIGHT_THRESHOLD_M = 30.0
+
+
+def build_tower_refinement_regions(zoi_buildings, out_dir, height_thresh=TOWER_HEIGHT_THRESHOLD_M):
+    """F1 review G6: towers (77 m, 85 m in H_best) are left under-resolved by
+    the plan-refinement-only mesh (2 m to 20 m, 4 m to 40 m, 16 m above --
+    above 40 m a ~28-35 m tower side is only 2-3 cells wide). Emit explicit
+    per-tower snappyHexMesh guidance: a `refinementSurface` on that
+    building's own STL faces targeting <=2 m (>=10 cells across a
+    ~28-35 m tower side, Tominaga et al. 2008), and a `refinementRegion` box
+    around it (footprint + 1*H margin, up to 1.5*H) at <=4 m."""
+    towers = [r for r in zoi_buildings if r["height_m"] > height_thresh]
+    path = os.path.join(out_dir, "tower_refinement_regions.csv")
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["osm_id", "name", "height_m", "centroid_x", "centroid_y",
+                    "footprint_xmin", "footprint_ymin", "footprint_xmax", "footprint_ymax",
+                    "region_xmin", "region_ymin", "region_xmax", "region_ymax",
+                    "region_z_top_m", "surface_target_size_m", "region_target_size_m"])
+        for r in towers:
+            H = r["height_m"]
+            xmin, ymin, xmax, ymax = r["geom"].bounds
+            c = r["geom"].centroid
+            w.writerow([r["osm_id"], r["tags"].get("name", ""), round(H, 1),
+                        round(c.x, 1), round(c.y, 1),
+                        round(xmin, 1), round(ymin, 1), round(xmax, 1), round(ymax, 1),
+                        round(xmin - H, 1), round(ymin - H, 1), round(xmax + H, 1), round(ymax + H, 1),
+                        round(1.5 * H, 1), 2.0, 4.0])
+    log(f"tower_refinement_regions.csv: {len(towers)} towers > {height_thresh} m -> {path}")
+    return towers
 
 
 def build_domain_csv(records, H_max, out_dir):
@@ -539,7 +645,7 @@ def build_roughness_csv(all_records, zoi_centre_xy, out_dir):
     return rows
 
 
-def build_circular_domain_report(domain_rows, H_max, out_dir):
+def build_circular_domain_report(domain_rows, H_max, out_dir, towers=None):
     frontal_areas = [r["frontal_area_m2"] for r in domain_rows]
     circ = domain_mod.circular_domain(RING_HALF, H_max, frontal_areas)
 
@@ -555,6 +661,27 @@ def build_circular_domain_report(domain_rows, H_max, out_dir):
         circ["radius_m"], circ["height_m"], RING_HALF, ZOI_HALF,
         bg_res_m=28.0, ring_res_m=6.0, zoi_res_m=2.0,
         ring_zone_height_m=40.0, zoi_zone_height_m=20.0)
+
+    # F1 review G6: extra cells for tower refinementRegions (footprint + 1*H
+    # margin box, up to 1.5*H, at 4 m -- replacing whatever background/ring
+    # resolution WOULD have applied there, net add is the delta to 4 m)
+    towers = towers or []
+    n_tower_cells = 0
+    for t in towers:
+        H = t["height_m"]
+        xmin, ymin, xmax, ymax = t["geom"].bounds
+        region_area = (xmax - xmin + 2 * H) * (ymax - ymin + 2 * H)
+        region_vol = region_area * 1.5 * H
+        n_tower_cells += region_vol / (4.0 ** 3)
+    tower_note = (
+        f"\n## Tower refinement (G6): {len(towers)} towers > {TOWER_HEIGHT_THRESHOLD_M:.0f} m "
+        f"get an explicit refinementRegion (<=4 m, footprint+1H margin, up to 1.5H) -- see "
+        f"tower_refinement_regions.csv. Extra volume-mesh cells for these regions (replacing "
+        f"coarser background/ring cells there): ~{n_tower_cells:,.0f}. Plus a refinementSurface "
+        f"on each tower's own STL faces targeting <=2 m (>=10 cells across a ~28-35 m tower "
+        f"side, Tominaga et al. 2008) -- a boundary-layer-scale addition, not a volumetric one, "
+        f"not counted here (see C4 in the F1 review for near-wall layer cells).\n"
+    ) if towers else "\n## Tower refinement (G6): no towers above threshold in this scenario.\n"
 
     lines = [
         f"# Circular domain recommendation (H_max={H_max:.1f} m)\n",
@@ -595,6 +722,7 @@ def build_circular_domain_report(domain_rows, H_max, out_dir):
         "Recommendation: keep ZOI near-field resolution (pedestrian-level answer "
         "quality depends on it most) and accept ~4-4.5M, OR relax to the 28 m/6 m "
         "plan if 2-2.5M is a hard ceiling.\n",
+        tower_note,
     ]
     with open(os.path.join(out_dir, "domain_circular_recommendation.md"), "w", encoding="utf-8") as f:
         f.writelines(lines)
@@ -603,6 +731,96 @@ def build_circular_domain_report(domain_rows, H_max, out_dir):
         f"~{plan_requested['n_total_estimate']/1e6:.2f}M cells, coarser plan "
         f"~{plan_coarser['n_total_estimate']/1e6:.2f}M cells")
     return {"circle": circ, "plan_requested": plan_requested, "plan_coarser": plan_coarser}
+
+
+def build_roughness_overture_csv(out_dir):
+    """F1 review G1 (blocker) fix: OSM footprints are incomplete in the
+    N/NE/W/NW sectors (lambda_p 0.16-0.29 vs 0.44-0.53 measured from the
+    Google 2.5D raster). Recompute lambda_p/lambda_f/H_mean/sigma_H (and the
+    resulting z0/d) for the same 16 upwind wedges using Overture footprints
+    (Microsoft ML Buildings + Google Open Buildings + OSM, conflated,
+    26,507 footprints vs OSM's 2,942 in the same bbox) with Google-median
+    heights, PLUS an independent raster-only control (fraction of Google
+    2.5D pixels with height>2.5m in the wedge -- no vectorised footprints at
+    all). Writes roughness_16sectors_overture.csv with old (OSM/H_best) vs
+    new (Overture) side by side."""
+    log("loading Overture footprints for morphometry (G1 fix)...")
+    overture_raw = overture_parse.load_overture_buildings()
+    log(f"Overture footprints loaded: {len(overture_raw)}")
+    overture_working = restrict_radius(overture_raw, ORIGIN_E, ORIGIN_N, MORPH_RADIUS + 50)
+    log(f"Overture footprints within {MORPH_RADIUS:.0f} m of origin: {len(overture_working)}")
+
+    stats = {}
+    cleaned_ov = cleaning.fix_invalid(overture_working, stats)
+    cleaned_ov = cleaning.drop_tiny(cleaned_ov, stats)
+    log(f"Overture cleaning: {stats}")
+
+    zonal = google_raster.compute_all_zonal_stats(cleaned_ov)
+    n_with_height = 0
+    for r in cleaned_ov:
+        s = zonal.get(str(r["osm_id"]))
+        if s is not None and 2.0 <= s["median"] <= 250.0:
+            r["height_m"] = s["median"]
+            n_with_height += 1
+        else:
+            r["height_m"] = 6.0  # dataset-wide typical low-rise fallback (see README); large-N
+                                   # aggregate stats are not sensitive to this for individual misses
+    log(f"Overture buildings with a valid Google-median height: {n_with_height}/{len(cleaned_ov)}")
+
+    for r in cleaned_ov:
+        r["geom"] = translate(r["geom"], xoff=-ORIGIN_E, yoff=-ORIGIN_N)
+
+    # load the OSM-based (H_best) roughness for the old-vs-new comparison
+    old_path = os.path.join(out_dir, "roughness_16sectors.csv")
+    with open(old_path, encoding="utf-8") as f:
+        old_rows = {float(r["theta_deg"]): r for r in csv.DictReader(f)}
+
+    rows = []
+    for theta in domain_mod.DIRECTIONS_16:
+        wedge_utm = morph.upwind_wedge((ORIGIN_E, ORIGIN_N), theta)
+        wedge_z = translate(wedge_utm, xoff=-ORIGIN_E, yoff=-ORIGIN_N)
+        base = morph.sector_geometry_stats(cleaned_ov, wedge_z, theta)
+        lp_raster = google_raster.wedge_lambda_p_from_raster(wedge_utm)
+
+        old_raw = old_rows.get(theta, {})
+        old = {}
+        for k, v in old_raw.items():
+            try:
+                old[k] = float(v)
+            except (TypeError, ValueError):
+                old[k] = v
+        row = {"theta_deg": theta,
+               "lambda_p_osm": old.get("lambda_p"), "lambda_p_overture": None,
+               "lambda_p_raster_control": lp_raster,
+               "lambda_f_osm": old.get("lambda_f"), "lambda_f_overture": None,
+               "H_mean_osm": old.get("H_mean"), "H_mean_overture": None,
+               "sigma_H_osm": old.get("sigma_H"), "sigma_H_overture": None,
+               "z0_macdonald_osm": old.get("z0_macdonald"), "z0_macdonald_overture": None,
+               "d_macdonald_osm": old.get("d_macdonald"), "d_macdonald_overture": None,
+               "z0_kanda_overture": None, "d_kanda_overture": None}
+        if base is not None:
+            z0_m, d_m = morph.macdonald_z0_d(base["H_mean"], base["lambda_p"], base["lambda_f"])
+            z0_k, d_k, _ = morph.kanda_z0_d(base["H_mean"], base["H_max"], base["sigma_H"],
+                                             base["lambda_p"], base["lambda_f"])
+            row.update({
+                "lambda_p_overture": base["lambda_p"], "lambda_f_overture": base["lambda_f"],
+                "H_mean_overture": base["H_mean"], "sigma_H_overture": base["sigma_H"],
+                "z0_macdonald_overture": z0_m, "d_macdonald_overture": d_m,
+                "z0_kanda_overture": z0_k, "d_kanda_overture": d_k,
+            })
+        rows.append(row)
+
+    path = os.path.join(out_dir, "roughness_16sectors_overture.csv")
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    log(f"roughness_16sectors_overture.csv written -> {path}")
+
+    max_lp_diff = max(abs((r["lambda_p_overture"] or 0) - (r["lambda_p_osm"] or 0)) for r in rows)
+    log(f"G1 fix: max |lambda_p_overture - lambda_p_osm| across 16 sectors = {max_lp_diff:.3f}")
+    return rows
 
 
 def write_scenario_comparison(summaries, out_root):

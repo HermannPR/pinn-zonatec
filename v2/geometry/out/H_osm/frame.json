@@ -7,6 +7,7 @@
   "origin_lat": 25.65355556778036,
   "zoi_half_size_m": 425.0,
   "ring_half_size_m": 545.0,
+  "eval_half_size_m": 325.0,
   "H_ref": 54.0,
   "H_ref_source": "osm_levels",
   "H_ref_osm_id": 546653067,

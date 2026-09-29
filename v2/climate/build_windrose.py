@@ -75,17 +75,27 @@ def main() -> None:
     completeness["MMMY"].to_csv(os.path.join(OUT_DIR, "completeness_mmmy.csv"), index=False)
     completeness["MMAN"].to_csv(os.path.join(OUT_DIR, "completeness_mman.csv"), index=False)
 
-    # ---- 5. sanity: empirical vs Weibull-based exceedance of 5 m/s ---------
+    # ---- 5. exceedance: empirical-first (review F1 I3), Weibull as fallback ----
     emp5 = wc.empirical_exceedance(hourly_15y, 5.0)
-    ann5 = wc.annual_exceedance(table, K=1.0, threshold_local=5.0)
+    ann5_weib = wc.annual_exceedance(table, K=1.0, threshold_local=5.0, method="weibull")
+    ann5_auto = wc.annual_exceedance(table, K=1.0, threshold_local=5.0,
+                                      sector_speeds=result.sector_speeds, method="auto")
     emp15 = wc.empirical_exceedance(hourly_15y, 15.0)
-    ann15 = wc.annual_exceedance(table, K=1.0, threshold_local=15.0)
+    ann15_weib = wc.annual_exceedance(table, K=1.0, threshold_local=15.0, method="weibull")
+    ann15_auto = wc.annual_exceedance(table, K=1.0, threshold_local=15.0,
+                                       sector_speeds=result.sector_speeds, method="auto")
+    ann10_auto = wc.annual_exceedance(table, K=1.0, threshold_local=10.0,
+                                       sector_speeds=result.sector_speeds, method="auto")
 
     print("=== MMMY windrose (2010-2024) ===")
     print(table.round(4).to_string(index=False))
     print(f"calm_fraction={result.calm_fraction:.4f}  variable_fraction={result.variable_fraction:.6f}")
-    print(f"P(U10>5 m/s): empirical={emp5:.4f}  weibull(K=1)={ann5['annual_probability']:.4f}")
-    print(f"P(U10>15 m/s): empirical={emp15:.4f}  weibull(K=1)={ann15['annual_probability']:.6f}")
+    print(f"P(U10>5 m/s): empirical(raw)={emp5*100:.4f}%  weibull(K=1)={ann5_weib['annual_probability']*100:.4f}%  "
+          f"auto(empirical-first)={ann5_auto['annual_probability']*100:.4f}%")
+    print(f"P(U10>10 m/s): auto(empirical-first)={ann10_auto['annual_probability']*100:.4f}%")
+    print(f"P(U10>15 m/s): empirical(raw)={emp15*100:.4f}%  weibull(K=1)={ann15_weib['annual_probability']*100:.6f}%  "
+          f"auto(empirical-first)={ann15_auto['annual_probability']*100:.4f}%  "
+          f"[{ann15_auto['annual_probability']*result.n_hours_total:.1f} h observadas en {len(YEARS_FULL)} anios]")
 
     prevail = table.sort_values("frequency", ascending=False).head(3)
     print("Top-3 sectors by frequency:")
@@ -105,9 +115,64 @@ def main() -> None:
     plot_windrose(hourly_15y, os.path.join(FIG_DIR, "windrose_mmmy.png"))
     plot_weibull_check(hourly_15y, table, os.path.join(FIG_DIR, "weibull_check_mmmy.png"))
 
+    # ---- 8. I2: two-layer roughness transfer report (blocker fix) ----------
+    try:
+        import transfer as tr
+        roughness = tr.load_roughness_table()
+        transfer_report = tr.report_transfer_ratios(roughness)
+        transfer_report.to_csv(os.path.join(OUT_DIR, "transfer_report_16sectors.csv"), index=False)
+        print("\n=== I2: transfer T=u*_regional/U10 per sector (macdonald, blend60 vs EN1991 vs naive export.py) ===")
+        print(transfer_report[["theta_deg", "z0_macdonald", "T_macdonald_blend60",
+                                "T_macdonald_en1991", "export_overestimate_pct_macdonald"]].round(4).to_string(index=False))
+    except FileNotFoundError as e:
+        print(f"\n[I2] transfer report skipped, roughness table not found: {e}")
+
+    # ---- 9. I5: MMMY representativeness vs ERA5 / SIMA Garza Laguera -------
+    print_i5_representativeness(table)
+
     print("\nWrote: windrose_16.csv, calm_variable_summary.csv, seasonal_daynight.csv,")
-    print("       completeness_mmmy.csv, completeness_mman.csv,")
+    print("       completeness_mmmy.csv, completeness_mman.csv, transfer_report_16sectors.csv,")
     print(f"       figures/windrose_mmmy.png, figures/weibull_check_mmmy.png")
+
+
+def print_i5_representativeness(table: pd.DataFrame) -> None:
+    """Review F1 I5: quantify how representative MMMY (airport, 18 km NNE of
+    campus) is of the campus wind climate, vs ERA5 (nearest reanalysis grid
+    cell to the campus) and SIMA "Preparatoria ITESM Garza Laguera" (rooftop
+    station ~4.1 km south of Campus Monterrey, inside the valley)."""
+    era5_path = r"E:\PINN\datos\viento\era5_openmeteo_rose16.csv"
+    if not os.path.exists(era5_path):
+        print(f"\n[I5] ERA5 rose not found at {era5_path}, skipping representativeness comparison")
+        return
+    era5 = pd.read_csv(era5_path)
+    # 8-point sector labels in the same clockwise-from-N order as SECTOR_CENTERS
+    labels16 = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    era5 = era5.set_index("sector").loc[labels16].reset_index()
+    mmmy_by_label = dict(zip(labels16, table.sort_values("sector_centre_deg")["frequency"] * 100))
+    era5_by_label = dict(zip(labels16, era5["freq_pct"]))
+
+    e_se_arc = ["ENE", "E", "ESE", "SE", "SSE"]  # 67.5-157.5 deg
+    mmmy_arc = sum(mmmy_by_label[l] for l in e_se_arc)
+    era5_arc = sum(era5_by_label[l] for l in e_se_arc)
+    se_only_arc = ["ESE", "SE", "SSE"]  # ~112.5-157.5, roughly what SIMA's coarse "SE" 8-pt bucket spans
+    mmmy_se = sum(mmmy_by_label[l] for l in se_only_arc)
+    era5_se = sum(era5_by_label[l] for l in se_only_arc)
+    n_nw_arc = ["N", "NNW", "NW"]
+    mmmy_nnw = sum(mmmy_by_label[l] for l in n_nw_arc)
+    era5_nnw = sum(era5_by_label[l] for l in n_nw_arc)
+
+    print("\n=== I5: representatividad de MMMY vs ERA5 (grilla campus) y SIMA Garza Laguera ===")
+    print(f"Arco ENE-SSE (67.5-157.5 deg): MMMY={mmmy_arc:.1f}%  ERA5(campus)={era5_arc:.1f}%  "
+          f"diff={era5_arc-mmmy_arc:+.1f} pp")
+    print(f"Arco ESE-SSE (~112.5-157.5, comparable al bin 'SE' de 8 puntos de SIMA): "
+          f"MMMY={mmmy_se:.1f}%  ERA5(campus)={era5_se:.1f}%  SIMA Garza Laguera 'SE'=33% (2021-2023)")
+    print(f"Arco N-NNW-NW: MMMY={mmmy_nnw:.1f}%  ERA5(campus)={era5_nnw:.1f}%  "
+          f"SIMA Garza Laguera 'N'+'NO'=17%+14%=31% (2021-2023)")
+    print("-> MMMY y ERA5 coinciden entre si (N/NW marginal, ~7%), pero AMBOS subrepresentan muy probablemente "
+          "el componente N/NW que la estacion dentro del valle (SIMA, mas cercana al campus) reporta como "
+          "sustancial (~31%), atribuido por el informe INECC 2025 a canalizacion NO-SE por la Sierra Madre "
+          "Oriental / Cerro de la Silla -- efecto orografico local que ni el aeropuerto (18 km NNE, fuera del "
+          "corredor) ni ERA5 (grilla ~31 km) resuelven. Ver README.md, seccion de limitaciones (I5).")
 
 
 def plot_windrose(hourly: pd.DataFrame, path: str) -> None:

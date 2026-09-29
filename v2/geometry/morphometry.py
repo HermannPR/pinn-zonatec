@@ -52,7 +52,9 @@ CD_MACDONALD = 1.2
 Z0_CONTROL_M = 1.0  # Wieringa 1993 / EN 1991-1-4 terrain category IV
 D_CONTROL_M = 0.0   # simple table method does not resolve d (documented simplification)
 
-R_IN_M = 560.0
+R_IN_M = 780.0  # F1 review G7: ring corners are at ring_half*sqrt(2)=545*1.4142=770.7 m;
+                # R_IN must clear that everywhere (560 m double-counted explicit-ring
+                # buildings in the diagonal sectors)
 R_OUT_M = 1200.0
 WEDGE_HALFWIDTH_DEG = 22.5  # -> 45 deg total wedge
 

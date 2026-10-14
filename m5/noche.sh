@@ -18,7 +18,13 @@ MEM_MIN=${MEM_MIN:-30}
 LOG=${LOG:-$COLA/noche.log}
 CTRL=${CTRL:-$HOME/pinn-control}
 # Misma version que Culiacan (v2306 MinGW + MS-MPI); la v2606 de brew queda para pruebas.
+SOLVER_PAT=${SOLVER_PAT:-simpleFoam -parallel}
 OF=${OF:-/Applications/OpenFOAM-v2306.app/Contents/Resources/etc/openfoam}
+
+# Una sola copia por cola (launchd la llama cada 30 min).
+PIDF=$COLA/.noche.pid
+if [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; then exit 0; fi
+echo $$ > "$PIDF"; trap 'rm -f "$PIDF"' EXIT
 
 log() { echo "$(date '+%m-%d %H:%M') $*" >> "$LOG"; }
 estado() { mkdir -p "$CTRL" && echo "$(date '+%m-%d %H:%M') $*" > "$CTRL/ESTADO"; }
@@ -41,14 +47,26 @@ for caso in "$COLA"/*/; do
 
   rm -f "$caso/.PAUSADO"
   log "arranca $caso"; estado "PINN corriendo $(basename "$caso")"
+  set -m   # el caso corre en su propio grupo de procesos (pid = pgid) para poder pararlo entero
   ( cd "$caso" && exec "$OF" -c ./Allrun ) >> "$caso/log.noche" 2>&1 &
   pid=$!
+  set +m
   while kill -0 "$pid" 2>/dev/null; do
     if ! en_ventana; then
       log "fin de ventana: writeNow en $caso"
       "$OF" -c "foamDictionary -entry stopAt -set writeNow '$caso/system/controlDict'" > /dev/null 2>&1
       touch "$caso/.PAUSADO"
-      wait "$pid"
+      # El Allrun corre por tramos y relanzaria el solver: en cuanto el solver escribe y sale
+      # (o a los 15 min), se detiene todo el grupo. Allrun reanuda desde latestTime y limpia tiempos incompletos.
+      vivos=$(pgrep -f "$SOLVER_PAT")   # los procesos del solver que estaban corriendo al pedir writeNow
+      for _ in $(seq 450); do
+        sleep 2
+        kill -0 "$pid" 2>/dev/null || break
+        sigue=0; for v in $vivos; do kill -0 "$v" 2>/dev/null && sigue=1; done
+        [ "$sigue" = 0 ] && break
+      done
+      kill -TERM -- "-$pid" 2>/dev/null; sleep 5; kill -KILL -- "-$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
       "$OF" -c "foamDictionary -entry stopAt -set endTime '$caso/system/controlDict'" > /dev/null 2>&1
       log "pausado $caso"; estado "PINN pausado en $(basename "$caso")"
       exit 0

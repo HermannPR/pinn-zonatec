@@ -17,6 +17,8 @@ HORA_FIN=${HORA_FIN:-7}
 MEM_MIN=${MEM_MIN:-30}
 LOG=${LOG:-$COLA/noche.log}
 CTRL=${CTRL:-$HOME/pinn-control}
+# Misma version que Culiacan (v2306 MinGW + MS-MPI); la v2606 de brew queda para pruebas.
+OF=${OF:-/Applications/OpenFOAM-v2306.app/Contents/Resources/etc/openfoam}
 
 log() { echo "$(date '+%m-%d %H:%M') $*" >> "$LOG"; }
 estado() { mkdir -p "$CTRL" && echo "$(date '+%m-%d %H:%M') $*" > "$CTRL/ESTADO"; }
@@ -39,15 +41,15 @@ for caso in "$COLA"/*/; do
 
   rm -f "$caso/.PAUSADO"
   log "arranca $caso"; estado "PINN corriendo $(basename "$caso")"
-  ( cd "$caso" && exec openfoam -c ./Allrun ) >> "$caso/log.noche" 2>&1 &
+  ( cd "$caso" && exec "$OF" -c ./Allrun ) >> "$caso/log.noche" 2>&1 &
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     if ! en_ventana; then
       log "fin de ventana: writeNow en $caso"
-      openfoam -c "foamDictionary -entry stopAt -set writeNow '$caso/system/controlDict'" > /dev/null 2>&1
+      "$OF" -c "foamDictionary -entry stopAt -set writeNow '$caso/system/controlDict'" > /dev/null 2>&1
       touch "$caso/.PAUSADO"
       wait "$pid"
-      openfoam -c "foamDictionary -entry stopAt -set endTime '$caso/system/controlDict'" > /dev/null 2>&1
+      "$OF" -c "foamDictionary -entry stopAt -set endTime '$caso/system/controlDict'" > /dev/null 2>&1
       log "pausado $caso"; estado "PINN pausado en $(basename "$caso")"
       exit 0
     fi

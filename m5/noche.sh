@@ -9,6 +9,7 @@
 # - touch <cola>/.PARAR o el interruptor $CTRL/PAUSA (~/pinn-control/PAUSA, lo mueve la maestra)
 #   detienen igual que el fin de ventana. Corre solo si hay ventana Y no hay PAUSA.
 # - Deja una linea de estado en $CTRL/ESTADO para que la maestra la lea en voz.
+# - La bandera CEDER del gestor de recursos (RAM critica con un render) tambien detiene, igual que PAUSA.
 # - No arranca si memory_pressure da menos de MEM_MIN% libre o si hay un render (ffmpeg, Resolve).
 set -u
 COLA=${1:?uso: noche.sh <cola>}
@@ -20,6 +21,8 @@ CTRL=${CTRL:-$HOME/pinn-control}
 # Misma version que Culiacan (v2306 MinGW + MS-MPI); la v2606 de brew queda para pruebas.
 SOLVER_PAT=${SOLVER_PAT:-simpleFoam -parallel}
 OF=${OF:-/Applications/OpenFOAM-v2306.app/Contents/Resources/etc/openfoam}
+# Bandera del gestor de recursos (clase CIENCIA): con RAM critica pide guardar (writeNow) y ceder.
+CEDER=${CEDER:-$HOME/Library/Application Support/hivemind/gestor/CEDER}
 
 # Una sola copia por cola (launchd la llama cada 30 min).
 PIDF=$COLA/.noche.pid
@@ -30,6 +33,7 @@ log() { echo "$(date '+%m-%d %H:%M') $*" >> "$LOG"; }
 estado() { mkdir -p "$CTRL" && echo "$(date '+%m-%d %H:%M') $*" > "$CTRL/ESTADO"; }
 en_ventana() {
   [ -e "$COLA/.PARAR" ] || [ -e "$CTRL/PAUSA" ] && return 1   # parada manual: se trata como fin de ventana
+  [ -e "$CEDER" ] && return 1                                  # el gestor pide ceder (RAM critica con un render)
   local h=$((10#$(date +%H)))
   if [ "$HORA_INI" -gt "$HORA_FIN" ]; then [ "$h" -ge "$HORA_INI" ] || [ "$h" -lt "$HORA_FIN" ]
   else [ "$h" -ge "$HORA_INI" ] && [ "$h" -lt "$HORA_FIN" ]; fi

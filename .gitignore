@@ -1,14 +1,16 @@
-.vercel/
-__pycache__/
-*.pyc
-.venv/
-venv/
-node_modules/
-.env
-.env.*
 
 # el master de 41 MB no va al repo; se regenera con pelicula.mjs
-video/wind-pinn.mp4
-video/wind-pinn-web.mp4
-video/texto
+*.pyc
+.env
+.env.*
+.venv/
+.vercel/
+__pycache__/
 f3/
+node_modules/
+train/.venv/
+train/runs/
+venv/
+video/texto
+video/wind-pinn-web.mp4
+video/wind-pinn.mp4

@@ -13,7 +13,8 @@
 # - No arranca si memory_pressure da menos de MEM_MIN% libre o si hay un render (ffmpeg, Resolve).
 # - <cola>/.noche.env (opcional) fija variables por cola, p. ej. la cadena var2 (OK14, 17 oct):
 #     SILENCIO_MIN=30  no arranca un caso nuevo hasta que pasen 30 min sin mensajes de Hermann
-#                      (ts de la ultima linea de SILENCIO_ARCHIVO); el caso que ya corre no se toca
+#                      (ts de la ultima linea de SILENCIO_ARCHIVO) Y 30 min sin teclado ni raton en la M5
+#                      (HIDIdleTime de ioreg); si alguna no se puede leer, no arranca. El caso que ya corre no se toca
 #     CADENA=1         si un caso queda FAILED no se lanza ningun otro (la cadena caliente depende del anterior)
 set -u
 COLA=${1:?uso: noche.sh <cola>}
@@ -48,10 +49,22 @@ en_ventana() {
 }
 mem_libre() { memory_pressure | awk -F': ' '/free percentage/ {gsub("%","",$2); print $2}'; }
 hay_render() { pgrep -qx ffmpeg || pgrep -qf 'DaVinci Resolve'; }
-# Minutos desde el ultimo mensaje de Hermann; si no se puede leer, 0 (no arranca, lo seguro)
+# Minutos desde el ultimo mensaje de Hermann; vacio si no se puede leer
 min_silencio() {
   local ts; ts=$(tail -1 "$SILENCIO_ARCHIVO" 2>/dev/null | sed -n 's/.*"ts": *\([0-9]*\).*/\1/p')
-  [ -n "$ts" ] && echo $(( ($(date +%s) - ts) / 60 )) || echo 0
+  [ -n "$ts" ] && echo $(( ($(date +%s) - ts) / 60 ))
+}
+# Minutos sin teclado ni raton en la M5 (Hermann tambien escribe directo en la sesion de escritorio)
+IDLE_CMD=${IDLE_CMD:-ioreg -c IOHIDSystem}
+min_idle() { $IDLE_CMD 2>/dev/null | awk '/HIDIdleTime/ {print int($NF/1000000000/60); exit}'; }
+# 0 si Hermann lleva SILENCIO_MIN sin mensajes y sin teclado/raton; si algo no se lee, no arranca
+hermann_dormido() {
+  local s i; s=$(min_silencio); i=$(min_idle)
+  case "$s" in ''|*[!0-9]*) log "no pude leer $SILENCIO_ARCHIVO, salgo"; return 1;; esac
+  case "$i" in ''|*[!0-9]*) log "no pude leer HIDIdleTime, salgo"; return 1;; esac
+  if [ "$s" -lt "$SILENCIO_MIN" ] || [ "$i" -lt "$SILENCIO_MIN" ]; then
+    log "Hermann activo (mensaje hace $s min, teclado hace $i min; pido $SILENCIO_MIN), salgo"; return 1
+  fi
 }
 
 for caso in "$COLA"/*/; do
@@ -65,8 +78,8 @@ for caso in "$COLA"/*/; do
   en_ventana || { log "fuera de ventana o en PAUSA, salgo"; estado "PINN en pausa (sin ventana o PAUSA)"; exit 0; }
   if [ "$(mem_libre)" -lt "$MEM_MIN" ]; then log "memoria libre $(mem_libre)% < $MEM_MIN%, salgo"; exit 0; fi
   if hay_render; then log "hay un render corriendo, salgo"; exit 0; fi
-  if [ "$SILENCIO_MIN" -gt 0 ] && [ "$(min_silencio)" -lt "$SILENCIO_MIN" ]; then
-    log "Hermann activo hace $(min_silencio) min (< $SILENCIO_MIN), salgo"; estado "PINN espera silencio de Hermann"; exit 0
+  if [ "$SILENCIO_MIN" -gt 0 ] && ! hermann_dormido; then
+    estado "PINN espera silencio de Hermann"; exit 0
   fi
 
   rm -f "$caso/.PAUSADO"

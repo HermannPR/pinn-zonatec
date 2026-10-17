@@ -16,12 +16,16 @@
 #                      (ts de la ultima linea de SILENCIO_ARCHIVO) Y 30 min sin teclado ni raton en la M5
 #                      (HIDIdleTime de ioreg); si alguna no se puede leer, no arranca. El caso que ya corre no se toca
 #     CADENA=1         si un caso queda FAILED no se lanza ningun otro (la cadena caliente depende del anterior)
+#     RESCATE=<script> si un caso falla, lo rescata en caliente (m5/rescate_caso.sh) y lo reintenta una vez;
+#                      si vuelve a fallar queda .FAILED y la cola sigue (con CADENA=0). Orden de Hermann 17 oct.
 set -u
 COLA=${1:?uso: noche.sh <cola>}
 [ -f "$COLA/.noche.env" ] && . "$COLA/.noche.env"
 SILENCIO_MIN=${SILENCIO_MIN:-0}
 SILENCIO_ARCHIVO=${SILENCIO_ARCHIVO:-$HOME/cerebro/certyca/datos/para-mind.jsonl}
 CADENA=${CADENA:-0}
+RESCATE=${RESCATE:-}
+POLL=${POLL:-60}
 HORA_INI=${HORA_INI:-23}
 HORA_FIN=${HORA_FIN:-7}
 MEM_MIN=${MEM_MIN:-30}
@@ -67,21 +71,16 @@ hermann_dormido() {
   fi
 }
 
-for caso in "$COLA"/*/; do
-  caso=${caso%/}
-  [ -e "$caso/.DONE" ] && continue
-  if [ -e "$caso/.FAILED" ]; then
-    [ "$CADENA" = 1 ] && { log "cadena parada: $caso FAILED"; estado "PINN cadena parada en $(basename "$caso")"; exit 0; }
-    continue
-  fi
-  [ -x "$caso/Allrun" ] || { log "$caso sin Allrun, salto"; continue; }
+# Sale (exit 0) si no toca arrancar: ventana, memoria, render o Hermann despierto. Se revisa antes de cada intento.
+puede_arrancar() {
   en_ventana || { log "fuera de ventana o en PAUSA, salgo"; estado "PINN en pausa (sin ventana o PAUSA)"; exit 0; }
   if [ "$(mem_libre)" -lt "$MEM_MIN" ]; then log "memoria libre $(mem_libre)% < $MEM_MIN%, salgo"; exit 0; fi
   if hay_render; then log "hay un render corriendo, salgo"; exit 0; fi
-  if [ "$SILENCIO_MIN" -gt 0 ] && ! hermann_dormido; then
-    estado "PINN espera silencio de Hermann"; exit 0
-  fi
-
+  if [ "$SILENCIO_MIN" -gt 0 ] && ! hermann_dormido; then estado "PINN espera silencio de Hermann"; exit 0; fi
+}
+# Corre el Allrun del caso; 0 si termina bien. Al fin de ventana pide writeNow, deja .PAUSADO y sale del script.
+correr() {
+  local caso=$1 pid vivos sigue v
   rm -f "$caso/.PAUSADO"
   log "arranca $caso"; estado "PINN corriendo $(basename "$caso")"
   set -m   # el caso corre en su propio grupo de procesos (pid = pgid) para poder pararlo entero
@@ -108,11 +107,31 @@ for caso in "$COLA"/*/; do
       log "pausado $caso"; estado "PINN pausado en $(basename "$caso")"
       exit 0
     fi
-    sleep 60
+    sleep "$POLL"
   done
-  if wait "$pid"; then touch "$caso/.DONE"; log "termina $caso"
-  else touch "$caso/.FAILED"; log "FALLA $caso (ver log.noche)"
+  wait "$pid"
+}
+
+for caso in "$COLA"/*/; do
+  caso=${caso%/}
+  [ -e "$caso/.DONE" ] && continue
+  if [ -e "$caso/.FAILED" ]; then
     [ "$CADENA" = 1 ] && { log "cadena parada: $caso FAILED"; estado "PINN cadena parada en $(basename "$caso")"; exit 0; }
+    continue
   fi
+  [ -x "$caso/Allrun" ] || { log "$caso sin Allrun, salto"; continue; }
+  for intento in 1 2; do
+    puede_arrancar
+    if correr "$caso"; then touch "$caso/.DONE"; log "termina $caso"; break; fi
+    # Rescate en caliente y un solo reintento (orden de Hermann 17 oct); el .rescatado evita rescatar dos veces
+    if [ "$intento" = 1 ] && [ -n "$RESCATE" ] && [ ! -e "$caso/.rescatado" ]; then
+      log "FALLA $caso; rescate en caliente"
+      if "$RESCATE" "$caso" >> "$COLA/rescate.log" 2>&1; then log "rescatado $caso, reintento"; continue; fi
+      log "el rescate de $caso fallo (ver rescate.log)"
+    fi
+    touch "$caso/.FAILED"; log "FALLA $caso (ver log.noche)"
+    [ "$CADENA" = 1 ] && { log "cadena parada: $caso FAILED"; estado "PINN cadena parada en $(basename "$caso")"; exit 0; }
+    break
+  done
 done
 log "cola vacia"; estado "PINN cola vacia"

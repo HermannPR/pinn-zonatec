@@ -11,8 +11,16 @@
 # - Deja una linea de estado en $CTRL/ESTADO para que la maestra la lea en voz.
 # - La bandera CEDER del gestor de recursos (RAM critica con un render) tambien detiene, igual que PAUSA.
 # - No arranca si memory_pressure da menos de MEM_MIN% libre o si hay un render (ffmpeg, Resolve).
+# - <cola>/.noche.env (opcional) fija variables por cola, p. ej. la cadena var2 (OK14, 17 oct):
+#     SILENCIO_MIN=30  no arranca un caso nuevo hasta que pasen 30 min sin mensajes de Hermann
+#                      (ts de la ultima linea de SILENCIO_ARCHIVO); el caso que ya corre no se toca
+#     CADENA=1         si un caso queda FAILED no se lanza ningun otro (la cadena caliente depende del anterior)
 set -u
 COLA=${1:?uso: noche.sh <cola>}
+[ -f "$COLA/.noche.env" ] && . "$COLA/.noche.env"
+SILENCIO_MIN=${SILENCIO_MIN:-0}
+SILENCIO_ARCHIVO=${SILENCIO_ARCHIVO:-$HOME/cerebro/certyca/datos/para-mind.jsonl}
+CADENA=${CADENA:-0}
 HORA_INI=${HORA_INI:-23}
 HORA_FIN=${HORA_FIN:-7}
 MEM_MIN=${MEM_MIN:-30}
@@ -40,14 +48,26 @@ en_ventana() {
 }
 mem_libre() { memory_pressure | awk -F': ' '/free percentage/ {gsub("%","",$2); print $2}'; }
 hay_render() { pgrep -qx ffmpeg || pgrep -qf 'DaVinci Resolve'; }
+# Minutos desde el ultimo mensaje de Hermann; si no se puede leer, 0 (no arranca, lo seguro)
+min_silencio() {
+  local ts; ts=$(tail -1 "$SILENCIO_ARCHIVO" 2>/dev/null | sed -n 's/.*"ts": *\([0-9]*\).*/\1/p')
+  [ -n "$ts" ] && echo $(( ($(date +%s) - ts) / 60 )) || echo 0
+}
 
 for caso in "$COLA"/*/; do
   caso=${caso%/}
-  [ -e "$caso/.DONE" ] || [ -e "$caso/.FAILED" ] && continue
+  [ -e "$caso/.DONE" ] && continue
+  if [ -e "$caso/.FAILED" ]; then
+    [ "$CADENA" = 1 ] && { log "cadena parada: $caso FAILED"; estado "PINN cadena parada en $(basename "$caso")"; exit 0; }
+    continue
+  fi
   [ -x "$caso/Allrun" ] || { log "$caso sin Allrun, salto"; continue; }
   en_ventana || { log "fuera de ventana o en PAUSA, salgo"; estado "PINN en pausa (sin ventana o PAUSA)"; exit 0; }
   if [ "$(mem_libre)" -lt "$MEM_MIN" ]; then log "memoria libre $(mem_libre)% < $MEM_MIN%, salgo"; exit 0; fi
   if hay_render; then log "hay un render corriendo, salgo"; exit 0; fi
+  if [ "$SILENCIO_MIN" -gt 0 ] && [ "$(min_silencio)" -lt "$SILENCIO_MIN" ]; then
+    log "Hermann activo hace $(min_silencio) min (< $SILENCIO_MIN), salgo"; estado "PINN espera silencio de Hermann"; exit 0
+  fi
 
   rm -f "$caso/.PAUSADO"
   log "arranca $caso"; estado "PINN corriendo $(basename "$caso")"
@@ -78,6 +98,8 @@ for caso in "$COLA"/*/; do
     sleep 60
   done
   if wait "$pid"; then touch "$caso/.DONE"; log "termina $caso"
-  else touch "$caso/.FAILED"; log "FALLA $caso (ver log.noche)"; fi
+  else touch "$caso/.FAILED"; log "FALLA $caso (ver log.noche)"
+    [ "$CADENA" = 1 ] && { log "cadena parada: $caso FAILED"; estado "PINN cadena parada en $(basename "$caso")"; exit 0; }
+  fi
 done
 log "cola vacia"; estado "PINN cola vacia"

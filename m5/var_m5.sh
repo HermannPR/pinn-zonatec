@@ -30,6 +30,9 @@ PY
     [ -n "$prev" ] && args+=(--warm-from "$prev")
     ( cd "$ZT_SC" && "$ZT_PY" gen_case.py "${args[@]}" )
     sed -i '' 's/mpiexec -n /mpiexec --oversubscribe -n /' "$caso/Allrun"
+    # parches M5 (17 oct): bug //sers de gen_case, salida local y rutas ZT_*
+    sed -i '' -e 's|"//sers/|"/Users/|g' -e 's|extract_h5.py \. 2>&1|extract_h5.py . --out-dir h5_m5 2>\&1|' "$caso/Allrun"
+    grep -q "^export ZT_V2" "$caso/Allrun" || perl -pi -e '$_ .= "export ZT_V2=$ENV{ZT_V2} ZT_RUNS=$ENV{ZT_RUNS} ZT_PY=$ENV{ZT_PY} ZT_SC=$ENV{ZT_SC}\n" if /^PY=/' "$caso/Allrun"
     chmod +x "$caso/Allrun"
   fi
   ln -sfn "$caso" "$COLA/$(printf %02d $((N0+k)))_$cid"

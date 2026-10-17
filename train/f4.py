@@ -61,6 +61,8 @@ p.add_argument("--w-div", type=float, default=0.1)
 p.add_argument("--w-wall", type=float, default=0.1)
 p.add_argument("--rampa", type=int, default=5000, help="iters para subir la fisica de 0 a su peso")
 p.add_argument("--incluir-no-convergidos", action="store_true")
+p.add_argument("--w-meseta", type=float, default=0.5,
+               help="peso de datos de casos en meseta (C7 por oscilacion de estela; 0 = fuera)")
 p.add_argument("--ckpt-cada", type=int, default=500)
 p.add_argument("--eval-cada", type=int, default=4000)
 p.add_argument("--check", type=int, default=50)
@@ -126,6 +128,15 @@ def manifest():
     with open(V2 / "data/processed/manifest.csv") as f:
         filas = list(csv.DictReader(f))
     return [r for r in filas if (V2 / r["path"]).exists()]
+
+
+def es_meseta(r):
+    """Casos que no pasan C7 solo por la oscilacion de la estela: cln los marca en el manifest (columna flag)
+    o en los attrs del HDF5; traen el promedio de las ultimas 500 iteraciones."""
+    if "meseta" in (r.get("flag") or "").lower():
+        return True
+    with h5py.File(V2 / r["path"], "r") as f:
+        return "meseta" in str(f.attrs.get("flag", "")).lower()
 
 
 def leer(r, idx=None, campos=("x", "y", "z", "u", "v", "w", "p")):
@@ -285,13 +296,24 @@ def main():
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     filas = manifest()
-    train = [r for r in filas if r["split"] == "train" and (r["converged"] == "True" or args.incluir_no_convergidos)]
-    log("casos", train=[r["case_id"] for r in train], fuera=[r["case_id"] for r in filas if r not in train])
+    peso = {}
+    for r in filas:
+        if r["split"] != "train":
+            continue
+        if r["converged"] == "True":
+            peso[r["case_id"]] = 1.0
+        elif es_meseta(r) and args.w_meseta > 0:
+            peso[r["case_id"]] = args.w_meseta
+        elif args.incluir_no_convergidos:
+            peso[r["case_id"]] = 1.0
+    train = [r for r in filas if r["case_id"] in peso]
+    log("casos", train={r["case_id"]: peso[r["case_id"]] for r in train},
+        fuera=[r["case_id"] for r in filas if r not in train])
     if not args.sin_ceder and (m := motivo_ceder()):
         log("cede antes de cargar", motivo=m)
         sys.exit(EXIT_CEDE)
 
-    Xs, Ys, Cs, Ws, ths = [], [], [], [], []
+    Xs, Ys, Cs, Ws, Ps, ths = [], [], [], [], [], []
     for r in train:
         with h5py.File(V2 / r["path"], "r") as f:
             n = f["x"].shape[0]
@@ -299,13 +321,15 @@ def main():
         idx = np.sort(rng.choice(n, min(n, args.pts_caso), replace=False))
         d, uh, th = leer(r, idx)
         Xs.append(entrada(d["x"], d["y"], d["z"], th)); Ys.append(salida(d, uh)); ths.append(th)
+        Ps.append(np.full(len(idx), peso[r["case_id"]], np.float32))
         Cs.append(np.stack([d["x"], d["y"], d["z"]], 1).astype(np.float32))
         Ws.append(wx[rng.choice(len(wx), min(len(wx), 100_000), replace=False)].astype(np.float32))
     X = torch.from_numpy(np.concatenate(Xs)).to(dev)
     Y = torch.from_numpy(np.concatenate(Ys)).to(dev)
+    P = torch.from_numpy(np.concatenate(Ps)).to(dev)
     C = np.concatenate(Cs)
     W = np.concatenate(Ws)
-    del Xs, Ys, Cs, Ws
+    del Xs, Ys, Cs, Ws, Ps
     log("datos", n=len(X), ncol=len(C), nwall=len(W), dev=str(dev))
     evaluar = Evaluador(filas, train)
 
@@ -336,7 +360,7 @@ def main():
             sys.exit(EXIT_CEDE)
         rampa = min(1.0, it / max(1, args.rampa))
         i = torch.randint(0, len(X), (args.batch,), device=dev)
-        l_dat = (((red(X[i]) - Y[i]) ** 2) * wy).mean()
+        l_dat = ((((red(X[i]) - Y[i]) ** 2) * wy).mean(1) * P[i]).sum() / P[i].sum()
 
         jc = rng.integers(0, len(C), args.ncol)
         thc = rng.uniform(0, 360, args.ncol)

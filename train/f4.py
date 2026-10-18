@@ -36,7 +36,7 @@ import numpy as np
 import torch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-V2 = ROOT / "f3/paquete/pinn/v2"
+V2 = pathlib.Path(os.environ["ZT_V2"]) if os.environ.get("ZT_V2") else ROOT / "f3/paquete/pinn/v2"
 CEDER = pathlib.Path.home() / "Library/Application Support/hivemind/gestor/CEDER"
 PAUSA = pathlib.Path.home() / "pinn-control/PAUSA_ENTRENO"
 EXIT_CEDE = 75
@@ -69,13 +69,18 @@ p.add_argument("--check", type=int, default=50)
 p.add_argument("--mem-min", type=int, default=25)
 p.add_argument("--threads", type=int, default=4)
 p.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
+p.add_argument("--variant", default="base",
+               help="variante a usar (base/var1/var2) o 'all'; la red no tiene entrada de variante (a2)")
+p.add_argument("--theta-harm", type=int, default=1, help="armonicos de direccion cos/sin k*theta, k=1..K (a2)")
+p.add_argument("--w-suave", type=float, default=0.0, help="peso de la suavidad en theta, d2U/dtheta2 (a2)")
+p.add_argument("--h-suave", type=float, default=11.25, help="paso en grados de la diferencia finita en theta")
 p.add_argument("--seed", type=int, default=0)
 p.add_argument("--sin-ceder", action="store_true", help="solo pruebas cortas")
 args = p.parse_args()
 
 try:
     os.nice(19)
-except OSError:
+except (OSError, AttributeError):   # Windows no tiene os.nice
     pass
 torch.set_num_threads(args.threads)
 RUN = ROOT / "train/runs" / args.run
@@ -169,7 +174,7 @@ class Red(torch.nn.Module):
         sig = [float(s) for s in args.ff_sigma.split(",")]
         B = torch.cat([torch.randn(3, args.ff, generator=g) * s for s in sig], 1)
         self.register_buffer("B", B)
-        n_in = 2 * B.shape[1] + 5
+        n_in = 2 * B.shape[1] + 5 + 2 * (args.theta_harm - 1)
         capas, w = [], args.width
         for i in range(args.depth):
             capas += [torch.nn.Linear(n_in if i == 0 else w, w), torch.nn.SiLU()]
@@ -179,7 +184,12 @@ class Red(torch.nn.Module):
     def forward(self, X):
         xyz = X[:, :3]
         a = 2 * math.pi * xyz @ self.B
-        return self.mlp(torch.cat([torch.sin(a), torch.cos(a), X], 1))
+        partes = [torch.sin(a), torch.cos(a), X]
+        if args.theta_harm > 1:
+            th = torch.atan2(X[:, 4:5], X[:, 3:4])
+            k = torch.arange(2, args.theta_harm + 1, device=X.device, dtype=X.dtype)
+            partes += [torch.cos(th * k), torch.sin(th * k)]
+        return self.mlp(torch.cat(partes, 1))
 
 
 def divergencia(red, X):
@@ -192,6 +202,14 @@ def divergencia(red, X):
         g = torch.autograd.grad(out[:, i].sum(), X, create_graph=True)[0][:, i]
         div = div + g * esc[i] * 87.75
     return div
+
+
+def suavidad(red, xyz, th_deg, wy):
+    """(d2 out / d theta2)^2 por diferencias centradas en theta (rad); penaliza oscilaciones entre direcciones train."""
+    h = args.h_suave
+    f = [red(torch.from_numpy(entrada(*xyz, th_deg + s)).to(dev)) for s in (-h, 0.0, h)]
+    d2 = (f[0] - 2 * f[1] + f[2]) / math.radians(h) ** 2
+    return ((d2 ** 2) * wy).mean()
 
 
 # ---------------------------------------------------------------- evaluacion
@@ -251,14 +269,16 @@ class Evaluador:
         return np.stack([d["u"], d["v"], d["w"], d["p"]], 1), uh
 
     def referencia(self, r, idx, cid, th, uh):
-        if r["mesh_id"] != "m1" or not self.train_m1:
+        # misma variante: las celdas (idx/cell_id) solo coinciden dentro de una misma malla (cln 18-oct)
+        cand = [t for t in self.train_m1 if t.get("variant", "base") == r.get("variant", "base")]
+        if r["mesh_id"] != "m1" or not cand:
             return None
-        ths = np.array([float(t["theta_deg"]) for t in self.train_m1])
+        ths = np.array([float(t["theta_deg"]) for t in cand])
         if r["split"] == "test-speed":
             j = np.where(np.isclose(ths, th))[0]
             if not len(j):
                 return None
-            f, uh0 = self.campo_train(self.train_m1[j[0]], idx, cid)
+            f, uh0 = self.campo_train(cand[j[0]], idx, cid)
             if f is None:
                 return None
             f = f.copy(); f[:, :3] *= uh / uh0; f[:, 3] *= (uh / uh0) ** 2
@@ -269,8 +289,8 @@ class Evaluador:
         b = int(np.argmin(np.where(dif > 0, dif, np.inf)))            # la mas cercana por arriba
         ta, tb = ths[a], ths[b]
         da, db = (th - ta) % 360, (tb - th) % 360
-        fa, ua = self.campo_train(self.train_m1[a], idx, cid)
-        fb, ub = self.campo_train(self.train_m1[b], idx, cid)
+        fa, ua = self.campo_train(cand[a], idx, cid)
+        fb, ub = self.campo_train(cand[b], idx, cid)
         if fa is None or fb is None:
             return None
         wa = db / (da + db)
@@ -295,7 +315,7 @@ class Evaluador:
 def main():
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
-    filas = manifest()
+    filas = [r for r in manifest() if args.variant == "all" or r.get("variant", "base") == args.variant]
     peso = {}
     for r in filas:
         if r["split"] != "train":
@@ -352,7 +372,7 @@ def main():
         os.replace(tmp, ck)
 
     wy = torch.tensor([1, 1, 1, args.w_p], device=dev)
-    t0, acum = time.time(), np.zeros(3)
+    t0, acum = time.time(), np.zeros(4)
     for it in range(it0, args.iters):
         if it % args.check == 0 and it > it0 and not args.sin_ceder and (m := motivo_ceder()):
             guardar(it)
@@ -372,14 +392,16 @@ def main():
         Xw = torch.from_numpy(entrada(W[jw, 0], W[jw, 1], W[jw, 2], thw)).to(dev)
         l_wall = (red(Xw)[:, :3] ** 2).mean()
 
-        loss = l_dat + rampa * (args.w_div * l_div + args.w_wall * l_wall)
+        l_suave = suavidad(red, (C[jc, 0], C[jc, 1], C[jc, 2]), thc, wy) if args.w_suave > 0 else torch.zeros((), device=dev)
+
+        loss = l_dat + rampa * (args.w_div * l_div + args.w_wall * l_wall + args.w_suave * l_suave)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step(); sch.step()
-        acum += [l_dat.item(), l_div.item(), l_wall.item()] if it % 50 == 0 else 0
+        acum += [l_dat.item(), l_div.item(), l_wall.item(), l_suave.item()] if it % 50 == 0 else 0
         if (it + 1) % 500 == 0:
             log("iter", it=it + 1, datos=round(acum[0] / 10, 6), div=round(acum[1] / 10, 6),
-                pared=round(acum[2] / 10, 6), lr=sch.get_last_lr()[0], s_por_100=round((time.time() - t0) / 5, 2))
+                pared=round(acum[2] / 10, 6), suave=round(acum[3] / 10, 6), lr=sch.get_last_lr()[0], s_por_100=round((time.time() - t0) / 5, 2))
             acum[:], t0 = 0, time.time()
         if (it + 1) % args.ckpt_cada == 0:
             guardar(it + 1)

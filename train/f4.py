@@ -76,6 +76,7 @@ p.add_argument("--w-suave", type=float, default=0.0, help="peso de la suavidad e
 p.add_argument("--h-suave", type=float, default=11.25, help="paso en grados de la diferencia finita en theta")
 p.add_argument("--seed", type=int, default=0)
 p.add_argument("--sin-ceder", action="store_true", help="solo pruebas cortas")
+p.add_argument("--solo-eval", action="store_true", help="evalua red.pt del run con el manifest actual y sale")
 args = p.parse_args()
 
 try:
@@ -250,7 +251,7 @@ class Evaluador:
         self.train_m1 = sorted([r for r in train if r["mesh_id"] == "m1" and float(r["U10"]) == 5.0],
                                key=lambda r: float(r["theta_deg"]))
         for r in filas:
-            if r["split"] not in ("test-direction", "test-speed", "gci"):
+            if r["split"] not in ("test-direction", "test-direction-fino", "test-speed", "gci"):
                 continue
             with h5py.File(V2 / r["path"], "r") as f:
                 n = f["x"].shape[0]
@@ -305,7 +306,7 @@ class Evaluador:
                 m["referencia"] = c["base"]["tipo"]
                 m["ref"] = metricas(c["base"]["pred"], c["ref"], c["z"])
             res[c["fila"]["case_id"]] = {"split": c["fila"]["split"], **m}
-        json.dump({"iter": it, "casos": res}, open(RUN / "metricas.json", "w"), indent=1)
+        json.dump({"iter": it, "casos": res}, open(RUN / ("metricas.json" if it >= 0 else "metricas-eval.json"), "w"), indent=1)
         log("eval", it=it, **{k: round(v["rel_l2_vel"], 4) for k, v in res.items()})
         return res
 
@@ -354,6 +355,10 @@ def main():
     evaluar = Evaluador(filas, train)
 
     red = Red().to(dev)
+    if args.solo_eval:
+        red.load_state_dict(torch.load(RUN / "red.pt", map_location=dev))
+        evaluar(red, -1)
+        return
     opt = torch.optim.Adam(red.parameters(), lr=args.lr)
     sch = torch.optim.lr_scheduler.LambdaLR(opt, lambda i: 0.5 * (1 + math.cos(math.pi * min(i, args.iters) / args.iters)) * 0.97 + 0.03)
     it0 = 0

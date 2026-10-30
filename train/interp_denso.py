@@ -1,7 +1,7 @@
-"""Entregable opcion A: interpolacion lineal en theta sobre la CFD densa (base m1 U050, 32 direcciones a 11.25 grados).
+"""Entregable: interpolacion lineal en theta sobre la CFD densa (base m1 U050, 32 direcciones a 11.25 grados).
 
 Campos adimensionales (u,v,w)/u_h y p/u_h^2 se interpolan entre las dos direcciones vecinas; u_h tambien se interpola en theta.
-La velocidad escala lineal con U10 y la presion con U10^2 (similitud de Reynolds, validada en rescale_check.json).
+La velocidad escala lineal con U10 y la presion con U10^2 (similitud de Reynolds, validada contra el CFD a 10 m/s).
 
   consulta: python -I interp_denso.py consulta <V2> <theta_deg> <U10> <salida.h5>
   evaluar:  python -I interp_denso.py evaluar  <V2> [N_puntos] [salida.json]

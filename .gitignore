@@ -14,3 +14,5 @@ venv/
 video/texto
 video/wind-pinn-web.mp4
 video/wind-pinn.mp4
+/entrega/
+*.bak
